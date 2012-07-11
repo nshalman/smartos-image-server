@@ -3,7 +3,7 @@ smartos-image-server
 
 bare minimum image server for SmartOS
 
-Requires node-restify (npm install restify)
+Requires nodejs>=0.8 and node-restify (npm install restify)
 
 structure:
 smartos-image-server/
