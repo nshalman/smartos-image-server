@@ -29,3 +29,6 @@ and add http://<your_ip>:8080/datasets to /var/db/imgadm/sources.list
 imgadm update
 imgadm avail
  etc.
+
+Someone else has written a tool to make it easy to generate manifest files:
+https://github.com/project-fifo/nomnom/tree/master/tools
