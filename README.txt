@@ -8,12 +8,12 @@ Requires nodejs>=0.8 and node-restify (npm install restify)
 structure:
 smartos-image-server/
 	server.js
+	config.json
 	<uuid>/
 		manifest.json
 		<zfs-stream-file>.<extension>
 
-There is almost no error checking,
-Incorrectly formatted manifest files might bring down the server.
+There is some basic error checking, but it could probably be improved.
 Patches Welcome!!
 
 To install in a SmartOS Zone:
@@ -25,7 +25,7 @@ npm install restify
 ./server.js
 
 then copy in a bunch of manifests and compressed zfs send streams in the right hierarchy
-and add http://<your_ip>:8080/datasets to /var/db/imgadm/sources.list
+and add http://<your_ip>/datasets to /var/db/imgadm/sources.list
 imgadm update
 imgadm avail
  etc.
