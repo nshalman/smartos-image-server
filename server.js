@@ -91,7 +91,7 @@ function imagefile(req, res, next) {
  */
 function ping(req, res, next) {
 	res.send({"ping":"pong"});
-	req.log.info("served up /datasets");
+	req.log.info("served up /ping");
 	return next();
 }
 
