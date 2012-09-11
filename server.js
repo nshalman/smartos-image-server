@@ -5,7 +5,15 @@ var    path = require('path');
 var      fs = require('fs');
 
 /* read in configuration */
-var config = require('./config')
+var config = require('./config');
+var serve_dir;
+
+if (config["serve_dir"]){
+	serve_dir = config["serve_dir"];
+}
+else {
+	serve_dir = process.cwd();
+}
 
 /*
  * We autogenerate the url property for each file to ensure that it is correct.
@@ -14,7 +22,7 @@ var config = require('./config')
  */
 function process_manifest(req, uuid) {
 	var manifest;
-	try{
+	try {
 		manifest = require('./' + uuid + '/manifest');
 		var url_prefix = config.prefix + req.header('Host') + config.suffix + "/datasets/" + uuid + "/";
 		for (entry in manifest.files) {
@@ -33,7 +41,7 @@ function process_manifest(req, uuid) {
  */
 function alldatasets(req, res, next) {
 	var everything = [];
-	fs.readdir(process.cwd(), function (err, dirlist) {
+	fs.readdir(serve_dir, function (err, dirlist) {
 		if (err) {
 			res.send(500, 'Internal Server Error');
 			return;
@@ -72,13 +80,14 @@ function manifest(req, res, next) {
  * Serve up the requested image file
  */
 function imagefile(req, res, next) {
-	var filename = path.join(process.cwd(), req.params.id + '/' + req.params.path);
+	var filename = path.join(serve_dir, req.params.id + '/' + req.params.path);
 	req.log.info("serving up /datasets/" + req.params.id + '/' + req.params.path);
 	fs.exists(filename, function (exists) {
 		if (!exists) {
 			res.send(404, '404 Not Found');
 			return;
 		} else {
+			res.header("Content-Type", "application/octet-stream");
 			var stream = fs.createReadStream(filename, { bufferSize: 64 * 1024 });
 			stream.pipe(res);
 		}
@@ -92,6 +101,23 @@ function imagefile(req, res, next) {
 function ping(req, res, next) {
 	res.send({"ping":"pong"});
 	req.log.info("served up /ping");
+	return next();
+}
+
+/*
+ * Serve /
+ */
+function slash(req, res, next) {
+	var accept = req.header("Accept");
+	if (accept && (accept.search("application/xhtml+xml") != -1 || accept.search("text/html") != -1)) {
+		var stream = fs.createReadStream(serve_dir + "/index.html", { bufferSize: 64 * 1024 });
+		stream.pipe(res);
+	} else {
+		res.header("Content-Type", "application/json");
+		var stream = fs.createReadStream(serve_dir + "/index.json", { bufferSize: 64 * 1024 });
+		stream.pipe(res);
+	}
+	req.log.info("served up /");
 	return next();
 }
 
@@ -110,8 +136,15 @@ setup_routes(server, '/datasets', alldatasets);
 setup_routes(server, '/datasets/:id', manifest);
 setup_routes(server, '/datasets/:id/:path', imagefile);
 setup_routes(server, '/ping', ping);
+setup_routes(server, '/', slash);
 
 server.log.level(config.loglevel);
 server.listen(config.listen_port, function() {
-  console.log('%s listening at %s', server.name, server.url);
+	if ( typeof config.listen_port == "string") {
+		console.log('listening on unix socket: %s', config.listen_port);
+	}
+	else {
+		console.log('%s listening at %s', server.name, server.url);
+	}
+	console.log('serving from %s', serve_dir);
 });

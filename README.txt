@@ -32,3 +32,25 @@ imgadm avail
 
 Someone else has written a tool to make it easy to generate manifest files:
 https://github.com/project-fifo/nomnom/tree/master/tools
+
+Behind nginx
+============
+These examples taken straight from my running server
+
+config.json:
+{
+	"listen_port": "/var/tmp/image-server.sock",
+	"prefix": "http://",
+	"suffix": "",
+	"loglevel": "info"
+}
+
+nginx config snippet:
+    server {
+        listen       80;
+        server_name  datasets.shalman.org;
+        location / {
+            proxy_set_header Host $host;
+            proxy_pass http://unix:/var/tmp/image-server.sock:;
+        }
+    }
