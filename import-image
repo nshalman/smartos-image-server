@@ -1,0 +1,98 @@
+#!/usr/bin/bash
+# import-image
+#   Helper utility for smartos-image-server
+#   https://github.com/nshalman/smartos-image-server
+#
+#   This takes an stdin stream (a zfs snapshot), generates a 
+#   UUID, and populates a smartos-image-server with the files 
+#   (zfs.gz, manifest.json) it needs to serve the image.
+#
+# Usage:
+#   import_image <name> <version> <description>
+#
+# From the global zone (into an image server zone):
+#
+#   You can follow the steps below, or copy the included 
+#   "mkimg" script to /opt/local/bin in your global zone 
+#   and use it (see that script for usage).
+#
+#   Stop your zone and create a snapshot of it.
+#      vmadm stop <uuid>
+#      zfs snapshot zones/<uuid>@image
+#
+#   Then send the image to the import-image script 
+#   located on your image server:
+#
+#      zfs send zones/<uuid>@image | gzip | ssh datasets.yourdomain.local './import-image <name> <version> "description"'
+#
+#   Once complete, you can:
+#
+#      imgadm update
+
+if [ $# -lt 3 ]; then
+	echo ""
+  echo "Missing arguments."
+	echo "Usage:"
+  echo "  cat image.zfs.gz | import-image <name> <version> '<description>'"
+	echo ""
+	exit 1
+fi
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+CREATOR=`cat $SCRIPT_DIR/config.json | json image-creator`
+CREATOR_UUID=`cat $SCRIPT_DIR/config.json | json image-creator-uuid`
+VENDOR_UUID=`cat $SCRIPT_DIR/config.json | json image-vendor-uuid`
+IMGSERVERDIR=`cat $SCRIPT_DIR/config.json | json serve_dir`
+if [ ! $IMGSERVERDIR ]; then
+  IMGSERVERDIR=$SCRIPT_DIR
+fi
+
+UUID=`uuid`
+NAME=$1
+VER=$2
+DESC=$3
+IMGDIR="$IMGSERVERDIR/$UUID"
+FILENAME="$NAME-$VER.zfs.gz"
+FILEPATH="$IMGDIR/$FILENAME"
+STAMP=`date +%Y-%m-%dT%H:%MZ`
+
+mkdir $IMGDIR > /dev/null 2>&1
+cat - > $FILEPATH
+DIGEST=`digest -a sha1 $FILEPATH`
+SIZE=`stat -c '%s' $FILEPATH`
+
+# Generate the manifest for smartos-image-server
+cat > $IMGSERVERDIR/$UUID/manifest.json << END
+{
+    "uuid": "$UUID",
+    "name": "$NAME",
+    "version": "$VER",
+    "description": "$DESC",
+
+    "os": "smartos",
+    "type": "zone-dataset",
+    "platform_type": "smartos",
+    "cloud_name": "$CREATOR",
+    "urn": "$CREATOR:$CREATOR:$NAME:$VER",
+
+    "creator_name": "$CREATOR",
+    "creator_uuid": "$CREATOR_UUID",
+    "vendor_uuid": "$VENDOR_UUID",
+
+    "created_at": "$STAMP",
+    "updated_at": "$STAMP",
+    "published_at": "$STAMP",
+
+    "files": [
+      {
+        "path": "$FILENAME",
+        "sha1": "$DIGEST",
+        "size": $SIZE,
+        "url": "-automatic-"
+      }
+    ]
+}
+END
+
+# Output the UUID we created
+echo $UUID
