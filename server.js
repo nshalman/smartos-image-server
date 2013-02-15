@@ -23,7 +23,7 @@ else {
 function process_manifest(req, uuid) {
 	var manifest;
 	try {
-		manifest = require('./' + uuid + '/manifest');
+		manifest = require(path.join(serve_dir, uuid + '/manifest'));
 		var url_prefix = config.prefix + req.header('Host') + config.suffix + "/datasets/" + uuid + "/";
 		for (entry in manifest.files) {
 			manifest.files[entry].url = url_prefix + manifest.files[entry].path
@@ -48,7 +48,7 @@ function alldatasets(req, res, next) {
 		}
 		else {
 			for (entry in dirlist) {
-				if (fs.existsSync(dirlist[entry] + '/manifest.json')) {
+				if (fs.existsSync(path.join(serve_dir, dirlist[entry] + '/manifest.json'))) {
 					var manifest = process_manifest(req, dirlist[entry]);
 					if ( manifest ) {
 						everything.push(manifest);
