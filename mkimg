@@ -1,0 +1,39 @@
+#!/usr/bin/bash
+
+# Creates an image from a VM
+#
+#   WARNING: You should run sm-prepare-image inside the zone
+#   BEFORE running this script!
+#
+#   This script stops the VM, takes a snapshot (@image), 
+#   and sends it to a smartos-image-server 
+#   (https://github.com/nshalman/smartos-image-server).
+#
+# Usage:
+#   mkimg <uuid> <name> <version> <description>
+#
+# CONFIGURE THESE THREE LINES FOR YOUR ENVIRONMENT
+IMGSERVER="datasets.organization.com"
+IMPORTPATH="/home/node/smartos-image-server/import-image"
+LOGIN="node"
+# END CONFIG
+
+
+REACHABLE=0
+ping $IMGSERVER > /dev/null 2>&1 && REACHABLE=1
+if [ $REACHABLE -eq 1 ]; then
+  echo "Stopping $1..."
+  vmadm stop $1 > /dev/null 2>&1
+  echo "Snapshotting VM..."
+  zfs destroy zones/$1@image
+  zfs snapshot zones/$1@image
+  echo "Sending zones/$1@image to $LOGIN@$IMGSERVER ..."
+  IMGUUID=`zfs send zones/$1@image | gzip | ssh $LOGIN@$IMGSERVER "$IMPORTPATH $2 $3 '$4'"`
+  echo "Import complete: $IMGUUID"
+  echo "Updating images..."
+  imgadm update
+  imgadm avail |grep $IMGUUID
+else
+  echo "Target image server is unreachable."
+  exit 1
+fi

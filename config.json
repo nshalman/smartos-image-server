@@ -1,13 +1,16 @@
 {
-	"comments": {
-		"listen_port": "port for node to listen on (can also be a file path to listen on a unix socket)",
-		"prefix": "prefix for urls of files being served. use https if behind SSL proxy",
-		"suffix": "use ':<port>' if node or proxy is on nonstandard port",
-		"loglevel": "use 'warn' to make the server quieter",
-		"serve_dir": "path of directory to serve.  server defaults to process.cwd()"
-	},
-	"listen_port": 80,
-	"prefix": "http://",
-	"suffix": "",
-	"loglevel": "info"
+  "comments": {
+    "listen_port": "port for node to listen on (can also be a file path to listen on a unix socket)",
+    "prefix": "prefix for urls of files being served. use https if behind SSL proxy",
+    "suffix": "use ':<port>' if node or proxy is on nonstandard port",
+    "loglevel": "use 'warn' to make the server quieter",
+    "serve_dir": "path of directory to serve.  server defaults to process.cwd()"
+  },
+  "listen_port": 80,
+  "prefix": "http://",
+  "suffix": "",
+  "loglevel": "info",
+  "image-creator": "internal",
+  "image-creator-uuid": "",
+  "image-vendor-uuid": ""
 }
