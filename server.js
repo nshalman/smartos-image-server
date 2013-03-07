@@ -88,6 +88,7 @@ function imagefile(req, res, next) {
 			return;
 		} else {
 			res.header("Content-Type", "application/octet-stream");
+			res.header("Content-Length", fs.statSync(filename).size);
 			var stream = fs.createReadStream(filename, { bufferSize: 64 * 1024 });
 			stream.pipe(res);
 		}
@@ -130,6 +131,11 @@ function setup_routes(server, route, handler) {
 }
 
 /* node restify rocks! */
+var server = restify.createServer({
+	name: 'dsapi',
+	version: '0.1.1'
+});
+
 var server = restify.createServer();
 
 setup_routes(server, '/datasets', alldatasets);
