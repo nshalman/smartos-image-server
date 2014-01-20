@@ -4,7 +4,7 @@
 IMAGE_CREATOR_UUID=`uuid`
 IMAGE_VENDOR_UUID=`uuid`
 USER=`whoami`
-GROUP=`groups |head -n1`
+GROUP=`groups | awk '{print $$1}'`
 SCRIPT_DIR=`pwd`
 NODE_PATH=`which node`
 
