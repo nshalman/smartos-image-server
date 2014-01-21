@@ -4,7 +4,6 @@
 IMAGE_CREATOR_UUID=`uuid`
 IMAGE_VENDOR_UUID=`uuid`
 USER=`whoami`
-GROUP=`groups |head -n1`
 SCRIPT_DIR=`pwd`
 NODE_PATH=`which node`
 
@@ -32,7 +31,7 @@ smf:
 	@echo '				<service_fmri value="svc:/system/filesystem/local"/>' >> image-server.smf.xml
 	@echo '			</dependency>' >> image-server.smf.xml
 	@echo "			<method_context working_directory=\"${SCRIPT_DIR}\">" >> image-server.smf.xml
-	@echo "				<method_credential user=\"${USER}\" group=\"${GROUP}\" privileges=\"basic,net_privaddr\" />" >> image-server.smf.xml
+	@echo "				<method_credential user=\"${USER}\" group=\":default\" supp_groups=\":default\" privileges=\"basic,net_privaddr\" />" >> image-server.smf.xml
 	@echo '			</method_context>' >> image-server.smf.xml
 	@echo "			<exec_method type=\"method\" name=\"start\" exec=\"${NODE_PATH} ${SCRIPT_DIR}/server.js\" timeout_seconds=\"60\"/>" >> image-server.smf.xml
 	@echo '			<exec_method type="method" name="stop" exec=":kill" timeout_seconds="60"/>' >> image-server.smf.xml
