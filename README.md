@@ -73,6 +73,26 @@ imgadm update
 imgadm avail
 ```
 
+# Loading images into project-fifo's web-ui "Remote Datasets"
+
+___Caution:___
+_This removes loading remote images from the mirror 'datasets.at'_
+
+Replace XXX.XXX.XXX.XXX with the IP or domain name of your smartos-image-server
+
+On your fifo machine, run:
+```
+imageserver_ip="XXX.XXX.XXX.XXX"
+sed -i 's/datasets.at/${imageserver_ip}/' /opt/local/fifo-jingles/app/scripts/config.js
+```
+
+To undo:
+```
+imageserver_ip="XXX.XXX.XXX.XXX"
+sed -i 's/${imageserver_ip}/datasets.at/' /opt/local/fifo-jingles/app/scripts/config.js
+```
+
+
 ## Publishing images
 
 There's a few options for publishing images to the image server:
