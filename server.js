@@ -47,6 +47,9 @@ function alldatasets(req, res, next) {
 			return;
 		}
 		else {
+			res.header("Access-Control-Allow-Headers", "Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token");
+			res.header("Access-Control-Allow-Methods", "PUT, GET, POST, DELETE, OPTIONS");
+			res.header("Access-Control-Allow-Origin", "*");
 			for (entry in dirlist) {
 				if (fs.existsSync(path.join(serve_dir, dirlist[entry] + '/manifest.json'))) {
 					var manifest = process_manifest(req, dirlist[entry]);
