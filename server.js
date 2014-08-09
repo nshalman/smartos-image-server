@@ -81,19 +81,6 @@ function manifest(req, res, next) {
 }
 
 /*
- * Generate a MD5 checksum of the dataset 
- */
-function process_dataset(filename) {
-  var hash = crypto.createHash('md5');
-  var stream = fs.createReadStream(filename);
-  
-  stream.on('data', function (data) { hash.update(data); });
-  stream.on('end', function () {
-    return hash.digest('base64'); 
-  });
-} 
-
-/*
  * Serve up the requested image file
  */
 function imagefile(req, res, next) {
@@ -107,9 +94,15 @@ function imagefile(req, res, next) {
 		} else {
 			res.header('Content-Type', 'application/octet-stream');
 			res.header('Content-Length', fs.statSync(filename).size);
-      res.header('Content-MD5', hash); 
-			var stream = fs.createReadStream(filename, { bufferSize: 64 * 1024 });
-			stream.pipe(res);
+      // process the file two times : one for md5hash and the last one for
+      // sending it.
+      var md5sum = fs.createReadStream(filename, { bufferSize: 64 * 1024 }); 
+      md5sum.on('data', function (data) { hash.update(data); }); 
+      md5sum.on('end', function () {
+        res.header('Content-MD5', hash.digest('base64')); 
+        var stream = fs.createReadStream(filename, { bufferSize: 64 * 1024 });  
+        stream.pipe(res);
+      }); 
 		}
 	});
 	return next();
