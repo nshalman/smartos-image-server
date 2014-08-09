@@ -3,13 +3,14 @@
 var restify = require('restify');
 var    path = require('path');
 var      fs = require('fs');
+var  crypto = require('crypto');
 
 /* read in configuration */
 var config = require('./config');
 var serve_dir;
 
-if (config["serve_dir"]){
-	serve_dir = config["serve_dir"];
+if (config['serve_dir']){
+	serve_dir = config['serve_dir'];
 }
 else {
 	serve_dir = process.cwd();
@@ -24,14 +25,14 @@ function process_manifest(req, uuid) {
 	var manifest;
 	try {
 		manifest = require(path.join(serve_dir, uuid + '/manifest'));
-		var url_prefix = config.prefix + req.header('Host') + config.suffix + "/datasets/" + uuid + "/";
+    var url_prefix = config.prefix + req.header('Host') + config.suffix + '/images/' + uuid + '/';
 		for (entry in manifest.files) {
 			manifest.files[entry].url = url_prefix + manifest.files[entry].path
 		};
 		return manifest;
 	}
 	catch(err) {
-		req.log.error("Failed to parse manifest for " + uuid + " error: " + err);
+		req.log.error('Failed to parse manifest for ' + uuid + ' error: ' + err);
 		return false;
 	}
 }
@@ -47,9 +48,9 @@ function alldatasets(req, res, next) {
 			return;
 		}
 		else {
-			res.header("Access-Control-Allow-Headers", "Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token");
-			res.header("Access-Control-Allow-Methods", "PUT, GET, POST, DELETE, OPTIONS");
-			res.header("Access-Control-Allow-Origin", "*");
+			res.header('Access-Control-Allow-Headers', 'Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token');
+			res.header('Access-Control-Allow-Methods', 'PUT, GET, POST, DELETE, OPTIONS');
+			res.header('Access-Control-Allow-Origin', '*');
 			for (entry in dirlist) {
 				if (fs.existsSync(path.join(serve_dir, dirlist[entry] + '/manifest.json'))) {
 					var manifest = process_manifest(req, dirlist[entry]);
@@ -59,7 +60,7 @@ function alldatasets(req, res, next) {
 				};
 			};
 			res.send(everything);
-			req.log.info("served up /datasets");
+			req.log.info('served up /images');
 		};
 	});
 	return next();
@@ -75,23 +76,38 @@ function manifest(req, res, next) {
 		return next();
 	}
 	res.send(process_manifest(req, req.params.id));
-	req.log.info("served up /datasets/" + req.params.id);
+	req.log.info('served up /images/' + req.params.id);
 	return next();
 }
+
+/*
+ * Generate a MD5 checksum of the dataset 
+ */
+function process_dataset(filename) {
+  var hash = crypto.createHash('md5');
+  var stream = fs.createReadStream(filename);
+  
+  stream.on('data', function (data) { hash.update(data); });
+  stream.on('end', function () {
+    return hash.digest('base64'); 
+  });
+} 
 
 /*
  * Serve up the requested image file
  */
 function imagefile(req, res, next) {
-	var filename = path.join(serve_dir, req.params.id + '/' + req.params.path);
-	req.log.info("serving up /datasets/" + req.params.id + '/' + req.params.path);
+	var filename = path.join(serve_dir, req.params.id + '/file');
+  var hash = process_dataset(filename);
+	req.log.info('serving up /images/' + req.params.id + '/file');
 	fs.exists(filename, function (exists) {
 		if (!exists) {
 			res.send(404, '404 Not Found');
 			return;
 		} else {
-			res.header("Content-Type", "application/octet-stream");
-			res.header("Content-Length", fs.statSync(filename).size);
+			res.header('Content-Type', 'application/octet-stream');
+			res.header('Content-Length', fs.statSync(filename).size);
+      res.header('Content-MD5', hash); 
 			var stream = fs.createReadStream(filename, { bufferSize: 64 * 1024 });
 			stream.pipe(res);
 		}
@@ -103,8 +119,12 @@ function imagefile(req, res, next) {
  * Implement ping
  */
 function ping(req, res, next) {
-	res.send({"ping":"pong"});
-	req.log.info("served up /ping");
+	res.send({
+    'ping':'pong',
+    'version':'1.2.0',
+    'imgapi': true
+  });
+	req.log.info('served up /ping');
 	return next();
 }
 
@@ -112,16 +132,16 @@ function ping(req, res, next) {
  * Serve /
  */
 function slash(req, res, next) {
-	var accept = req.header("Accept");
-	if (accept && (accept.search("application/xhtml+xml") != -1 || accept.search("text/html") != -1)) {
-		var stream = fs.createReadStream(serve_dir + "/index.html", { bufferSize: 64 * 1024 });
+	var accept = req.header('Accept');
+	if (accept && (accept.search('application/xhtml+xml') != -1 || accept.search('text/html') != -1)) {
+		var stream = fs.createReadStream(serve_dir + '/index.html', { bufferSize: 64 * 1024 });
 		stream.pipe(res);
 	} else {
-		res.header("Content-Type", "application/json");
-		var stream = fs.createReadStream(serve_dir + "/index.json", { bufferSize: 64 * 1024 });
+		res.header('Content-Type', 'application/json');
+		var stream = fs.createReadStream(serve_dir + '/index.json', { bufferSize: 64 * 1024 });
 		stream.pipe(res);
 	}
-	req.log.info("served up /");
+	req.log.info('served up /');
 	return next();
 }
 
@@ -141,15 +161,15 @@ var server = restify.createServer({
 
 var server = restify.createServer();
 
-setup_routes(server, '/datasets', alldatasets);
-setup_routes(server, '/datasets/:id', manifest);
-setup_routes(server, '/datasets/:id/:path', imagefile);
+setup_routes(server, '/images', alldatasets);
+setup_routes(server, '/images/:id', manifest);
+setup_routes(server, '/images/:id/file', imagefile);
 setup_routes(server, '/ping', ping);
 setup_routes(server, '/', slash);
 
 server.log.level(config.loglevel);
 server.listen(config.listen_port, function() {
-	if ( typeof config.listen_port == "string") {
+	if ( typeof config.listen_port == 'string') {
 		console.log('listening on unix socket: %s', config.listen_port);
 	}
 	else {
