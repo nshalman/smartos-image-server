@@ -85,6 +85,7 @@ function manifest(req, res, next) {
  */
 function imagefile(req, res, next) {
 	var filename = path.join(serve_dir, req.params.id + '/file');
+  var hash = crypto.createHash('md5');
 	req.log.info('serving up /images/' + req.params.id + '/file');
 	fs.exists(filename, function (exists) {
 		if (!exists) {
