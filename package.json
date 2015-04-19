@@ -1,7 +1,7 @@
 {
     "name": "smartos-image-server"
   , "description": "Serve SmartOS images"
-  , "version": "0.1.0"
+  , "version": "0.1.2"
   , "bin": {
     "image-server": "./server.js"
   }
