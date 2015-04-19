@@ -142,14 +142,14 @@ function slash(req, res, next) {
  * route creation helper
  */
 function setup_routes(server, route, handler) {
-  server.get(route, handler);
-  server.head(route, handler);
+  server.get({path: route, version: '2.0.0'}, handler);
+  server.head({path: route, version: '2.0.0'}, handler);
 }
 
 /* node restify rocks! */
 var server = restify.createServer({
   name: 'dsapi',
-  version: '0.1.1'
+  version: '2.0.0'
 });
 
 var server = restify.createServer();
