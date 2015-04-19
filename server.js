@@ -170,3 +170,24 @@ server.listen(config.listen_port, function() {
   }
   console.log('serving from %s', serve_dir);
 });
+
+/*
+ * handling exit signals
+ */
+// Ctrl+C
+process.once('SIGINT', function() {
+    // synchronous call of fs.unlink
+    // ensure we are deleting socket before exiting
+    fs.unlinkSync(config.listen_port);
+    console.log('exiting..');
+    process.exit(0);
+});
+
+// Used by PM2 (restart)
+process.once('SIGTERM', function() {
+    // synchronous call of fs.unlink
+    // ensure we are deleting socket before exiting
+    fs.unlinkSync(config.listen_port);
+    console.log('exiting..');
+    process.exit(0);
+});
