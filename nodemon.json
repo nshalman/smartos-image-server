@@ -1,0 +1,7 @@
+{
+  "restartable": "rs",
+  "verbose": true,
+  "events": {
+    "restart": "rm /var/tmp/image-server.sock"
+  }
+}

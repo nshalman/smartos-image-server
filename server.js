@@ -3,16 +3,17 @@
 var restify = require('restify');
 var    path = require('path');
 var      fs = require('fs');
+var  crypto = require('crypto');
 
 /* read in configuration */
 var config = require('./config');
 var serve_dir;
 
-if (config["serve_dir"]){
-	serve_dir = config["serve_dir"];
+if (config['serve_dir']){
+  serve_dir = config['serve_dir'];
 }
 else {
-	serve_dir = process.cwd();
+  serve_dir = process.cwd();
 }
 
 /*
@@ -21,139 +22,172 @@ else {
  * Adjust config.json if these urls are coming out wrong
  */
 function process_manifest(req, uuid) {
-	var manifest;
-	try {
-		manifest = require(path.join(serve_dir, uuid + '/manifest'));
-		var url_prefix = config.prefix + req.header('Host') + config.suffix + "/datasets/" + uuid + "/";
-		for (entry in manifest.files) {
-			manifest.files[entry].url = url_prefix + manifest.files[entry].path
-		};
-		return manifest;
-	}
-	catch(err) {
-		req.log.error("Failed to parse manifest for " + uuid + " error: " + err);
-		return false;
-	}
+  var manifest;
+  try {
+    manifest = require(path.join(serve_dir, uuid + '/manifest'));
+    var url_prefix = config.prefix + req.header('Host') + config.suffix + '/images/' + uuid + '/';
+    for (entry in manifest.files) {
+      manifest.files[entry].url = url_prefix + manifest.files[entry].path
+    };
+    return manifest;
+  }
+  catch(err) {
+    req.log.error('Failed to parse manifest for ' + uuid + ' error: ' + err);
+    return false;
+  }
 }
 
 /*
  * Smoosh together all manifests into an array and return it
  */
 function alldatasets(req, res, next) {
-	var everything = [];
-	fs.readdir(serve_dir, function (err, dirlist) {
-		if (err) {
-			res.send(500, 'Internal Server Error');
-			return;
-		}
-		else {
-			res.header("Access-Control-Allow-Headers", "Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token");
-			res.header("Access-Control-Allow-Methods", "PUT, GET, POST, DELETE, OPTIONS");
-			res.header("Access-Control-Allow-Origin", "*");
-			for (entry in dirlist) {
-				if (fs.existsSync(path.join(serve_dir, dirlist[entry] + '/manifest.json'))) {
-					var manifest = process_manifest(req, dirlist[entry]);
-					if ( manifest ) {
-						everything.push(manifest);
-					};
-				};
-			};
-			res.send(everything);
-			req.log.info("served up /datasets");
-		};
-	});
-	return next();
+  var everything = [];
+  fs.readdir(serve_dir, function (err, dirlist) {
+    if (err) {
+      res.send(500, 'Internal Server Error');
+      return;
+    }
+    else {
+      res.header('Access-Control-Allow-Headers', 'Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token');
+      res.header('Access-Control-Allow-Methods', 'PUT, GET, POST, DELETE, OPTIONS');
+      res.header('Access-Control-Allow-Origin', '*');
+      for (entry in dirlist) {
+        if (fs.existsSync(path.join(serve_dir, dirlist[entry] + '/manifest.json'))) {
+          var manifest = process_manifest(req, dirlist[entry]);
+          if ( manifest ) {
+            everything.push(manifest);
+          };
+        };
+      };
+      res.send(everything);
+      req.log.info('served up /images');
+    };
+  });
+  return next();
 }
 
 /*
  * Process and return the requested manifest
  */
 function manifest(req, res, next) {
-	var manifest = process_manifest(req, req.params.id);
-	if (!manifest) {
-		res.send(404, '404 Not Found');
-		return next();
-	}
-	res.send(process_manifest(req, req.params.id));
-	req.log.info("served up /datasets/" + req.params.id);
-	return next();
+  var manifest = process_manifest(req, req.params.id);
+  if (!manifest) {
+    res.send(404, '404 Not Found');
+    return next();
+  }
+  res.send(process_manifest(req, req.params.id));
+  req.log.info('served up /images/' + req.params.id);
+  return next();
 }
 
 /*
  * Serve up the requested image file
  */
 function imagefile(req, res, next) {
-	var filename = path.join(serve_dir, req.params.id + '/' + req.params.path);
-	req.log.info("serving up /datasets/" + req.params.id + '/' + req.params.path);
-	fs.exists(filename, function (exists) {
-		if (!exists) {
-			res.send(404, '404 Not Found');
-			return;
-		} else {
-			res.header("Content-Type", "application/octet-stream");
-			res.header("Content-Length", fs.statSync(filename).size);
-			var stream = fs.createReadStream(filename, { bufferSize: 64 * 1024 });
-			stream.pipe(res);
-		}
-	});
-	return next();
+  var filename = path.join(serve_dir, req.params.id + '/file');
+  var hash = crypto.createHash('md5');
+  req.log.info('serving up /images/' + req.params.id + '/file');
+  fs.exists(filename, function (exists) {
+    if (!exists) {
+      res.send(404, '404 Not Found');
+      return;
+    } else {
+      res.header('Content-Type', 'application/octet-stream');
+      res.header('Content-Length', fs.statSync(filename).size);
+      // process the file two times : one for md5hash and the last one for
+      // sending it.
+      var md5sum = fs.createReadStream(filename, { bufferSize: 64 * 1024 }); 
+      md5sum.on('data', function (data) { hash.update(data); }); 
+      md5sum.on('end', function () {
+        res.header('Content-MD5', hash.digest('base64')); 
+        var stream = fs.createReadStream(filename, { bufferSize: 64 * 1024 });  
+        stream.pipe(res);
+      }); 
+    }
+  });
+  return next();
 }
 
 /*
  * Implement ping
  */
 function ping(req, res, next) {
-	res.send({"ping":"pong"});
-	req.log.info("served up /ping");
-	return next();
+  res.send({
+    'ping':'pong',
+    'version':'1.2.0',
+    'imgapi': true
+  });
+  req.log.info('served up /ping');
+  return next();
 }
 
 /*
  * Serve /
  */
 function slash(req, res, next) {
-	var accept = req.header("Accept");
-	if (accept && (accept.search("application/xhtml+xml") != -1 || accept.search("text/html") != -1)) {
-		var stream = fs.createReadStream(serve_dir + "/index.html", { bufferSize: 64 * 1024 });
-		stream.pipe(res);
-	} else {
-		res.header("Content-Type", "application/json");
-		var stream = fs.createReadStream(serve_dir + "/index.json", { bufferSize: 64 * 1024 });
-		stream.pipe(res);
-	}
-	req.log.info("served up /");
-	return next();
+  var accept = req.header('Accept');
+  if (accept && (accept.search('application/xhtml+xml') != -1 || accept.search('text/html') != -1)) {
+    var stream = fs.createReadStream(serve_dir + '/index.html', { bufferSize: 64 * 1024 });
+    stream.pipe(res);
+  } else {
+    res.header('Content-Type', 'application/json');
+    var stream = fs.createReadStream(serve_dir + '/index.json', { bufferSize: 64 * 1024 });
+    stream.pipe(res);
+  }
+  req.log.info('served up /');
+  return next();
 }
 
 /*
  * route creation helper
  */
 function setup_routes(server, route, handler) {
-	server.get(route, handler);
-	server.head(route, handler);
+  server.get({path: route, version: '2.0.0'}, handler);
+  server.head({path: route, version: '2.0.0'}, handler);
 }
 
 /* node restify rocks! */
 var server = restify.createServer({
-	name: 'dsapi',
-	version: '0.1.1'
+  name: 'dsapi',
+  version: '2.0.0'
 });
 
 var server = restify.createServer();
 
-setup_routes(server, '/datasets', alldatasets);
-setup_routes(server, '/datasets/:id', manifest);
-setup_routes(server, '/datasets/:id/:path', imagefile);
+setup_routes(server, '/images', alldatasets);
+setup_routes(server, '/images/:id', manifest);
+setup_routes(server, '/images/:id/file', imagefile);
 setup_routes(server, '/ping', ping);
 setup_routes(server, '/', slash);
 
 server.log.level(config.loglevel);
 server.listen(config.listen_port, function() {
-	if ( typeof config.listen_port == "string") {
-		console.log('listening on unix socket: %s', config.listen_port);
-	}
-	else {
-		console.log('%s listening at %s', server.name, server.url);
-	}
-	console.log('serving from %s', serve_dir);
+  if ( typeof config.listen_port == 'string') {
+    console.log('listening on unix socket: %s', config.listen_port);
+  }
+  else {
+    console.log('%s listening at %s', server.name, server.url);
+  }
+  console.log('serving from %s', serve_dir);
+});
+
+/*
+ * handling exit signals
+ */
+// Ctrl+C
+process.once('SIGINT', function() {
+    // synchronous call of fs.unlink
+    // ensure we are deleting socket before exiting
+    fs.unlinkSync(config.listen_port);
+    console.log('exiting..');
+    process.exit(0);
+});
+
+// Used by PM2 (restart)
+process.once('SIGTERM', function() {
+    // synchronous call of fs.unlink
+    // ensure we are deleting socket before exiting
+    fs.unlinkSync(config.listen_port);
+    console.log('exiting..');
+    process.exit(0);
 });
