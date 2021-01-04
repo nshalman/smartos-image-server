@@ -3,23 +3,47 @@
  * Rust implementation of old smartos dsapi
  */
 
-use dropshot::endpoint;
-use dropshot::ApiDescription;
-use dropshot::ConfigDropshot;
-use dropshot::ConfigLogging;
-use dropshot::ConfigLoggingLevel;
-use dropshot::HttpError;
-use dropshot::HttpResponseOk;
-use dropshot::HttpServer;
-use dropshot::RequestContext;
+//use anyhow::{Result, bail, anyhow};
+use getopts::Options;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::env;
 use std::sync::Arc;
+use std::vec::Vec;
 use uuid::Uuid;
+
+use dropshot::{
+    ApiDescription,
+    ConfigDropshot,
+    ConfigLogging,
+    ConfigLoggingLevel,
+    endpoint,
+    HttpError,
+    HttpResponseOk,
+    HttpServer,
+    Path,
+    RequestContext,
+};
+
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
+    let args: Vec<String> = env::args().collect();
+    let program = args[0].clone();
+    let mut opts = Options::new();
+    opts.optflag("h", "help", "print this help menu");
+    opts.optopt("l", "listen", "listen on address:port", "LISTEN");
+    let matches = match opts.parse(&args[1..]) {
+        Ok(m) => { m }
+        Err(f) => { panic!(f.to_string()) }
+    };
+    if matches.opt_present("h") {
+        let brief = format!("Usage: {} [options]", program);
+        print!("{}", opts.usage(&brief));
+        std::process::exit(0);
+    }
+
     /*
      * We must specify a configuration with a bind address.  We'll use 127.0.0.1
      * since it's available and won't expose this server outside the host.  We
@@ -51,15 +75,16 @@ async fn main() -> Result<(), String> {
     */
     let mut api = ApiDescription::new();
     api.register(ping).unwrap();
+    api.register(datasets).unwrap();
+    api.register(dataset_id).unwrap();
+    api.register(dataset_id_path).unwrap();
 
     /*
      * The functions that implement our API endpoints will share this context.
      */
     let api_context = DsapiContext::new();
 
-    /*
-     * Emit my API at startup because, why not?
-     */
+    /* How to emit my API at startup:
     api.print_openapi(
         &mut std::io::stdout(),
         &"dsapi",
@@ -74,6 +99,7 @@ async fn main() -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     println!(""); // flush stdout with an extra newline
+     */
 
     /*
      * Set up the server.
@@ -161,4 +187,56 @@ struct Manifest {
     published_at: String,
 
     files: Files,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DsapiId {
+    id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct DsapiIdPath {
+    id: String,
+    path: String,
+}
+
+/** Get all datasets on this server*/
+#[endpoint {
+    method = GET,
+    path = "/datasets",
+}]
+async fn datasets(
+    _rqctx: Arc<RequestContext>,
+) -> Result<HttpResponseOk<Option<Vec<Manifest>>>, HttpError> {
+    Ok(HttpResponseOk(None))
+}
+
+/** Get all datasets on this server*/
+#[endpoint {
+    method = GET,
+    path = "/dataset/{id}",
+}]
+async fn dataset_id(
+    _rqctx: Arc<RequestContext>,
+    path_params: Path<DsapiId>,
+) -> Result<HttpResponseOk<String>, HttpError> {
+//) -> Result<HttpResponseOk<Option<Manifest>>, HttpError> {
+    let path_params = path_params.into_inner();
+    Ok(HttpResponseOk(path_params.id))
+}
+
+/** Get all datasets on this server*/
+#[endpoint {
+    method = GET,
+    path = "/dataset/{id}/{path}",
+}]
+async fn dataset_id_path(
+    _rqctx: Arc<RequestContext>,
+    path_params: Path<DsapiIdPath>,
+//) -> Result<HttpResponseOk<Option<Vec<Manifest>>>, HttpError> {
+) -> Result<HttpResponseOk<String>, HttpError> {
+    let path_params = path_params.into_inner();
+    let mut reply: String = path_params.id;
+    reply.push_str(&path_params.path);
+    Ok(HttpResponseOk(reply))
 }
