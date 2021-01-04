@@ -3,37 +3,27 @@ smartos-image-server
 
 bare minimum image server for SmartOS
 
+If you're reading this, you're looking at an in-progress port
+of smartos-image-server to rust using https://github.com/oxidecomputer/dropshot
+
+It is currently incomplete and I'm still learning both rust and dropshot
+(you can probably still find some copypasta from dropshot example code)
+so I don't recommend reading any of this as good or instructive (yet?)
+
+I hope to complete this port and clean up the code to be useful as an example
+of a super-simple dropshot application and then remove all these caveats!
+
 # Installing in a SmartOS zone
 
-```
-pkgin in nodejs scmgit
-git clone https://github.com/nshalman/smartos-image-server
-cd smartos-image-server
-make
-```
+TODO
 
 # Configuration
 
-After installation is complete, you should update config.json for 
-your environment. At the very least you should set an image-creator 
-name for your organization, if you intend to use the supplied 
-import-image script to publish images.
+TODO
 
 ## Running behind ngnix
 
-config.json:
-
-``` json
-{
-	"listen_port": "/var/tmp/image-server.sock",
-	"prefix": "http://",
-	"suffix": "",
-	"loglevel": "info",
-  "image-creator": "internal",
-  "image-creator-uuid": "...",
-  "image-vendor-uuid": "..."
-}
-```
+TODO
 
 nginx config snippet:
 
@@ -147,8 +137,7 @@ smartos-image-server/
 
 # Requirements
 
-* nodejs>=0.8
-* node-restify 
+TODO
 
 # Final thoughts
 
