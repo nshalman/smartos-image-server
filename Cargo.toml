@@ -8,9 +8,15 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1"
-dropshot = { git = "https://github.com/nshalman/dropshot", branch = "main" }
+dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "master" }
 getopts = "0.2"
 schemars = { version = "0.8", features = [ "uuid" ] }
 serde = { version = "1.0.0", features = [ "derive" ]}
+serde_json = "1"
 tokio = { version = "1", features = [ "full" ] }
 uuid = { version = "0.8.0", features = [ "serde", "v4" ] }
+slog = { version = "2.5.0", features = [ "max_level_trace", "release_max_level_debug" ] }
+slog-async = "2.4.0"
+slog-bunyan = "2.2.0"
+slog-json = "2.3.0"
+slog-term = "2.5.0"
