@@ -15,11 +15,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::vec::Vec;
 use tokio::fs as async_fs;
+use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
+use base64::Engine;
 use dropshot::{
-    endpoint, ApiDescription, Body, ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpError, HttpResponseOk,
-    Path as DropPath, RequestContext, ServerBuilder,
+    endpoint, ApiDescription, Body, ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpError,
+    HttpResponseOk, Path as DropPath, RequestContext, ServerBuilder,
 };
 use http::{Response, StatusCode};
 use std::net::SocketAddr;
@@ -87,12 +89,12 @@ async fn main() -> Result<(), String> {
     api.register(slash_head).unwrap();
     api.register(ping).unwrap();
     api.register(ping_head).unwrap();
-    api.register(datasets).unwrap();
-    api.register(datasets_head).unwrap();
-    api.register(dataset_id).unwrap();
-    api.register(dataset_id_head).unwrap();
-    api.register(dataset_id_path).unwrap();
-    api.register(dataset_id_path_head).unwrap();
+    api.register(images).unwrap();
+    api.register(images_head).unwrap();
+    api.register(image_id).unwrap();
+    api.register(image_id_head).unwrap();
+    api.register(image_id_file).unwrap();
+    api.register(image_id_file_head).unwrap();
 
     // Get bind address from command line or config before moving config
     let bind_config = matches
@@ -102,7 +104,7 @@ async fn main() -> Result<(), String> {
             serde_json::Value::String(s) => {
                 // If it's a string, assume it's host:port format
                 s.clone()
-            },
+            }
             _ => String::from("127.0.0.1:8876"),
         });
 
@@ -191,7 +193,7 @@ impl DsapiContext {
 
         // Update file URLs
         let url_prefix = format!(
-            "{}{}{}/datasets/{}/",
+            "{}{}{}/images/{}/",
             self.config.prefix, host, self.config.suffix, uuid
         );
 
@@ -281,6 +283,8 @@ async fn testme_head(
 #[derive(Deserialize, Serialize, JsonSchema)]
 struct Ping {
     ping: String,
+    version: String,
+    imgapi: bool,
 }
 
 /** Respond to a ping with pong*/
@@ -289,8 +293,11 @@ struct Ping {
     path = "/ping",
 }]
 async fn ping(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<Ping>, HttpError> {
-    let pong = "pong".to_string();
-    Ok(HttpResponseOk(Ping { ping: pong }))
+    Ok(HttpResponseOk(Ping {
+        ping: "pong".to_string(),
+        version: "1.2.0".to_string(),
+        imgapi: true,
+    }))
 }
 
 /** HEAD support for ping*/
@@ -301,8 +308,11 @@ async fn ping(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<Pin
 async fn ping_head(
     _rqctx: RequestContext<DsapiContext>,
 ) -> Result<HttpResponseOk<Ping>, HttpError> {
-    let pong = "pong".to_string();
-    Ok(HttpResponseOk(Ping { ping: pong }))
+    Ok(HttpResponseOk(Ping {
+        ping: "pong".to_string(),
+        version: "1.2.0".to_string(),
+        imgapi: true,
+    }))
 }
 
 /** Represents a file in a dataset manifest */
@@ -353,12 +363,6 @@ struct DsapiId {
     id: Uuid, // TODO: Convert UUID path param parsing properly
 }
 
-#[derive(Deserialize, JsonSchema)]
-struct DsapiIdPath {
-    id: Uuid, // TODO: Convert UUID path param parsing properly
-    path: String,
-}
-
 #[derive(Deserialize, Serialize, Debug)]
 struct Config {
     listen_port: serde_json::Value,
@@ -368,12 +372,12 @@ struct Config {
     serve_dir: Option<String>,
 }
 
-/** Get all datasets on this server*/
+/** Get all images on this server*/
 #[endpoint {
     method = GET,
-    path = "/datasets",
+    path = "/images",
 }]
-async fn datasets(rqctx: RequestContext<DsapiContext>) -> Result<Response<Body>, HttpError> {
+async fn images(rqctx: RequestContext<DsapiContext>) -> Result<Response<Body>, HttpError> {
     let context = rqctx.context();
     let host = rqctx
         .request
@@ -419,12 +423,12 @@ async fn datasets(rqctx: RequestContext<DsapiContext>) -> Result<Response<Body>,
         .body(body)?)
 }
 
-/** HEAD support for datasets list*/
+/** HEAD support for images list*/
 #[endpoint {
     method = HEAD,
-    path = "/datasets",
+    path = "/images",
 }]
-async fn datasets_head(
+async fn images_head(
     rqctx: RequestContext<DsapiContext>,
 ) -> Result<HttpResponseOk<Vec<Manifest>>, HttpError> {
     let context = rqctx.context();
@@ -455,12 +459,12 @@ async fn datasets_head(
     Ok(HttpResponseOk(manifests))
 }
 
-/** Get specific dataset manifest*/
+/** Get specific image manifest*/
 #[endpoint {
     method = GET,
-    path = "/datasets/{id}",
+    path = "/images/{id}",
 }]
-async fn dataset_id(
+async fn image_id(
     rqctx: RequestContext<DsapiContext>,
     path_params: DropPath<DsapiId>,
 ) -> Result<HttpResponseOk<Manifest>, HttpError> {
@@ -488,12 +492,12 @@ async fn dataset_id(
         })
 }
 
-/** HEAD support for specific dataset manifest*/
+/** HEAD support for specific image manifest*/
 #[endpoint {
     method = HEAD,
-    path = "/datasets/{id}",
+    path = "/images/{id}",
 }]
-async fn dataset_id_head(
+async fn image_id_head(
     rqctx: RequestContext<DsapiContext>,
     path_params: DropPath<DsapiId>,
 ) -> Result<HttpResponseOk<Manifest>, HttpError> {
@@ -521,20 +525,19 @@ async fn dataset_id_head(
         })
 }
 
-/** Serve dataset file*/
+/** Serve image file*/
 #[endpoint {
     method = GET,
-    path = "/datasets/{id}/{path}",
-    unpublished = true,
+    path = "/images/{id}/file",
 }]
-async fn dataset_id_path(
+async fn image_id_file(
     rqctx: RequestContext<DsapiContext>,
-    path_params: DropPath<DsapiIdPath>,
+    path_params: DropPath<DsapiId>,
 ) -> Result<Response<Body>, HttpError> {
     let context = rqctx.context();
     let path_params = path_params.into_inner();
     let uuid_str = path_params.id.to_string();
-    let file_path = context.serve_dir.join(&uuid_str).join(&path_params.path);
+    let file_path = context.serve_dir.join(&uuid_str).join("file");
 
     // Security check: ensure the file is within the dataset directory
     let canonical_base = context
@@ -553,17 +556,26 @@ async fn dataset_id_path(
         ));
     }
 
-    let file = async_fs::File::open(&file_path).await.map_err(|e| {
-        HttpError::for_bad_request(None, format!("failed to read file {:?}: {:#}", file_path, e))
+    // Read file for MD5 calculation first
+    let mut file_contents = Vec::new();
+    let mut file = async_fs::File::open(&file_path).await.map_err(|e| {
+        HttpError::for_bad_request(
+            None,
+            format!("failed to read file {:?}: {:#}", file_path, e),
+        )
     })?;
 
-    let metadata = file.metadata().await.map_err(|e| {
-        HttpError::for_internal_error(format!("Failed to get file metadata: {}", e))
+    file.read_to_end(&mut file_contents).await.map_err(|e| {
+        HttpError::for_internal_error(format!("Failed to read file contents: {}", e))
     })?;
 
-    let file_access = hyper_staticfile::vfs::TokioFileAccess::new(file);
-    let file_stream = hyper_staticfile::util::FileBytesStream::new(file_access);
-    let body = Body::wrap(hyper_staticfile::Body::Full(file_stream));
+    // Calculate MD5 hash
+    let digest = md5::compute(&file_contents);
+    let md5_b64 = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
+
+    // Store content length before moving file_contents
+    let content_length = file_contents.len();
+    let body = Body::with_content(file_contents);
 
     // Derive the MIME type from the file name
     let content_type = mime_guess::from_path(&file_path)
@@ -573,24 +585,24 @@ async fn dataset_id_path(
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
-        .header("Content-Length", metadata.len().to_string())
+        .header("Content-Length", content_length.to_string())
+        .header("Content-MD5", md5_b64)
         .body(body)?)
 }
 
-/** HEAD support for dataset files*/
+/** HEAD support for image files*/
 #[endpoint {
     method = HEAD,
-    path = "/datasets/{id}/{path}",
-    unpublished = true,
+    path = "/images/{id}/file",
 }]
-async fn dataset_id_path_head(
+async fn image_id_file_head(
     rqctx: RequestContext<DsapiContext>,
-    path_params: DropPath<DsapiIdPath>,
+    path_params: DropPath<DsapiId>,
 ) -> Result<Response<Body>, HttpError> {
     let context = rqctx.context();
     let path_params = path_params.into_inner();
     let uuid_str = path_params.id.to_string();
-    let file_path = context.serve_dir.join(&uuid_str).join(&path_params.path);
+    let file_path = context.serve_dir.join(&uuid_str).join("file");
 
     // Security check: ensure the file is within the dataset directory
     let canonical_base = context
@@ -609,9 +621,22 @@ async fn dataset_id_path_head(
         ));
     }
 
-    let metadata = async_fs::metadata(&file_path)
-        .await
-        .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
+    // Read file for MD5 calculation (HEAD still needs to calculate MD5)
+    let mut file_contents = Vec::new();
+    let mut file = async_fs::File::open(&file_path).await.map_err(|e| {
+        HttpError::for_bad_request(
+            None,
+            format!("failed to read file {:?}: {:#}", file_path, e),
+        )
+    })?;
+
+    file.read_to_end(&mut file_contents).await.map_err(|e| {
+        HttpError::for_internal_error(format!("Failed to read file contents: {}", e))
+    })?;
+
+    // Calculate MD5 hash
+    let digest = md5::compute(&file_contents);
+    let md5_b64 = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
 
     // Derive the MIME type from the file name
     let content_type = mime_guess::from_path(&file_path)
@@ -623,7 +648,8 @@ async fn dataset_id_path_head(
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", content_type)
-        .header("Content-Length", metadata.len().to_string())
+        .header("Content-Length", file_contents.len().to_string())
+        .header("Content-MD5", md5_b64)
         .body(body)?)
 }
 
@@ -662,7 +688,9 @@ mod tests {
         });
 
         let manifest_path = dataset_dir.join("manifest.json");
-        fs::write(&manifest_path, manifest_content.to_string()).await.unwrap();
+        fs::write(&manifest_path, manifest_content.to_string())
+            .await
+            .unwrap();
 
         let config = Config {
             listen_port: json!(8876),
@@ -672,11 +700,7 @@ mod tests {
             serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
         };
 
-        let context = DsapiContext::new(
-            json!({}),
-            config,
-            temp_dir.path().to_path_buf(),
-        );
+        let context = DsapiContext::new(json!({}), config, temp_dir.path().to_path_buf());
 
         let result = context.process_manifest(uuid, "localhost").await;
         assert!(result.is_ok());
@@ -685,8 +709,8 @@ mod tests {
         assert_eq!(manifest.uuid.to_string(), uuid);
         assert_eq!(manifest.files.len(), 1);
         assert!(manifest.files[0].url.is_some());
-        
-        let expected_url = format!("http://localhost:8876/datasets/{}/test-file.zfs.bz2", uuid);
+
+        let expected_url = format!("http://localhost:8876/images/{}/test-file.zfs.bz2", uuid);
         assert_eq!(manifest.files[0].url.as_ref().unwrap(), &expected_url);
     }
 
@@ -703,11 +727,7 @@ mod tests {
             serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
         };
 
-        let context = DsapiContext::new(
-            json!({}),
-            config,
-            temp_dir.path().to_path_buf(),
-        );
+        let context = DsapiContext::new(json!({}), config, temp_dir.path().to_path_buf());
 
         let result = context.process_manifest(uuid, "localhost").await;
         assert!(result.is_err());
@@ -716,14 +736,17 @@ mod tests {
     #[tokio::test]
     async fn test_get_all_dataset_uuids() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create test datasets
-        let uuids = ["08d4292e-4fa2-11e2-852e-c3b213e7719c", "550e8400-e29b-41d4-a716-446655440000"];
-        
+        let uuids = [
+            "08d4292e-4fa2-11e2-852e-c3b213e7719c",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ];
+
         for uuid in &uuids {
             let dataset_dir = temp_dir.path().join(uuid);
             fs::create_dir_all(&dataset_dir).await.unwrap();
-            
+
             let manifest_content = json!({
                 "uuid": uuid,
                 "name": "test",
@@ -737,9 +760,11 @@ mod tests {
                 "published_at": "2023-01-01T00:00:00.000Z",
                 "files": []
             });
-            
+
             let manifest_path = dataset_dir.join("manifest.json");
-            fs::write(&manifest_path, manifest_content.to_string()).await.unwrap();
+            fs::write(&manifest_path, manifest_content.to_string())
+                .await
+                .unwrap();
         }
 
         // Create directory without manifest (should be ignored)
@@ -754,32 +779,29 @@ mod tests {
             serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
         };
 
-        let context = DsapiContext::new(
-            json!({}),
-            config,
-            temp_dir.path().to_path_buf(),
-        );
+        let context = DsapiContext::new(json!({}), config, temp_dir.path().to_path_buf());
 
         let result = context.get_all_dataset_uuids().await;
         assert!(result.is_ok());
 
         let mut found_uuids = result.unwrap();
         found_uuids.sort();
-        
+
         let mut expected_uuids: Vec<String> = uuids.iter().map(|s| s.to_string()).collect();
         expected_uuids.sort();
-        
+
         assert_eq!(found_uuids, expected_uuids);
     }
 
     #[test]
     fn test_config_parsing() {
         // Test number port
-        let config_json = r#"{"listen_port": 8080, "prefix": "http://", "suffix": "", "loglevel": "info"}"#;
+        let config_json =
+            r#"{"listen_port": 8080, "prefix": "http://", "suffix": "", "loglevel": "info"}"#;
         let config: Config = serde_json::from_str(config_json).unwrap();
         assert_eq!(config.listen_port, json!(8080));
 
-        // Test string port  
+        // Test string port
         let config_json = r#"{"listen_port": "127.0.0.1:9000", "prefix": "http://", "suffix": "", "loglevel": "info"}"#;
         let config: Config = serde_json::from_str(config_json).unwrap();
         assert_eq!(config.listen_port, json!("127.0.0.1:9000"));
@@ -808,11 +830,7 @@ mod tests {
             serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
         };
 
-        let context = DsapiContext::new(
-            json!({}),
-            config,
-            temp_dir.path().to_path_buf(),
-        );
+        let context = DsapiContext::new(json!({}), config, temp_dir.path().to_path_buf());
 
         // Test that we can access a legitimate file
         let legitimate_path = context.serve_dir.join(uuid).join("test.txt");
@@ -831,9 +849,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_images_endpoint_integration() {
+        let temp_dir = TempDir::new().unwrap();
+        let uuid = "08d4292e-4fa2-11e2-852e-c3b213e7719c";
+        let dataset_dir = temp_dir.path().join(uuid);
+        fs::create_dir_all(&dataset_dir).await.unwrap();
+
+        let manifest_content = json!({
+            "uuid": uuid,
+            "name": "test-dataset",
+            "version": "1.0.0",
+            "description": "Test dataset",
+            "os": "smartos",
+            "type": "zone-dataset",
+            "urn": "test:test:test:1.0.0",
+            "creator_name": "test",
+            "creator_uuid": "550e8400-e29b-41d4-a716-446655440000",
+            "published_at": "2023-01-01T00:00:00.000Z",
+            "files": [
+                {
+                    "path": "test-file.zfs.bz2",
+                    "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                    "size": 12345
+                }
+            ]
+        });
+
+        let manifest_path = dataset_dir.join("manifest.json");
+        fs::write(&manifest_path, manifest_content.to_string())
+            .await
+            .unwrap();
+
+        // Create a test file
+        let test_file_content = b"test file content for md5";
+        let file_path = dataset_dir.join("file");
+        fs::write(&file_path, test_file_content).await.unwrap();
+
+        let config = Config {
+            listen_port: json!(0),
+            prefix: "http://".to_string(),
+            suffix: "".to_string(),
+            loglevel: "info".to_string(),
+            serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+        };
+
+        let config_logging = ConfigLogging::StderrTerminal {
+            level: ConfigLoggingLevel::Info,
+        };
+        let log = config_logging.to_logger("test").unwrap();
+
+        let mut api = ApiDescription::new();
+        api.register(images).unwrap();
+        api.register(image_id).unwrap();
+        api.register(image_id_file).unwrap();
+        api.register(ping).unwrap();
+
+        let api_description = api
+            .openapi("test", semver::Version::new(0, 2, 0))
+            .json()
+            .unwrap();
+        let api_context = DsapiContext::new(api_description, config, temp_dir.path().to_path_buf());
+
+        let config_dropshot = ConfigDropshot {
+            bind_address: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+
+        let server = ServerBuilder::new(api, api_context, log)
+            .config(config_dropshot)
+            .start()
+            .unwrap();
+
+        let local_addr = server.local_addr();
+        let client = reqwest::Client::new();
+
+        // Test /ping endpoint includes imgapi and version
+        let ping_response = client
+            .get(&format!("http://{}/ping", local_addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ping_response.status(), reqwest::StatusCode::OK);
+        let ping_body: serde_json::Value = ping_response.json().await.unwrap();
+        assert_eq!(ping_body["ping"], "pong");
+        assert_eq!(ping_body["version"], "1.2.0");
+        assert_eq!(ping_body["imgapi"], true);
+
+        // Test /images endpoint
+        let images_response = client
+            .get(&format!("http://{}/images", local_addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(images_response.status(), reqwest::StatusCode::OK);
+        let images_body: serde_json::Value = images_response.json().await.unwrap();
+        assert!(images_body.is_array());
+        assert_eq!(images_body.as_array().unwrap().len(), 1);
+
+        // Test /images/{id} endpoint
+        let image_response = client
+            .get(&format!("http://{}/images/{}", local_addr, uuid))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(image_response.status(), reqwest::StatusCode::OK);
+        let image_body: serde_json::Value = image_response.json().await.unwrap();
+        assert_eq!(image_body["uuid"], uuid);
+
+        // Test /images/{id}/file endpoint with MD5
+        let file_response = client
+            .get(&format!("http://{}/images/{}/file", local_addr, uuid))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(file_response.status(), reqwest::StatusCode::OK);
+        let content_md5 = file_response
+            .headers()
+            .get("content-md5")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(!content_md5.is_empty());
+        let response_body = file_response.bytes().await.unwrap();
+        assert_eq!(response_body.as_ref(), test_file_content);
+
+        server.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_ping_endpoint() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         let config = Config {
             listen_port: json!(0), // Let OS pick a port
             prefix: "http://".to_string(),
@@ -851,7 +997,10 @@ mod tests {
         api.register(ping).unwrap();
         api.register(ping_head).unwrap();
 
-        let api_description = api.openapi("test", semver::Version::new(0, 2, 0)).json().unwrap();
+        let api_description = api
+            .openapi("test", semver::Version::new(0, 2, 0))
+            .json()
+            .unwrap();
         let api_context = DsapiContext::new(api_description, config, temp_dir.path().to_path_buf());
 
         let config_dropshot = ConfigDropshot {
@@ -863,22 +1012,22 @@ mod tests {
             .config(config_dropshot)
             .start()
             .unwrap();
-        
+
         let local_addr = server.local_addr();
-        
+
         // Test GET /ping
         let url = format!("http://{}/ping", local_addr);
         let client = reqwest::Client::new();
         let response = client.get(&url).send().await.unwrap();
-        
+
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let body: serde_json::Value = response.json().await.unwrap();
         assert_eq!(body["ping"], "pong");
-        
+
         // Test HEAD /ping
         let response = client.head(&url).send().await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
-        
+
         server.close().await.unwrap();
     }
 }
