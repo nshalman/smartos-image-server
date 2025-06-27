@@ -24,3 +24,5 @@ tokio-util = { version = "0.7", features = ["codec", "io"] }
 futures = "0.3"
 semver = "1.0"
 http = "1.0"
+hyper-staticfile = "0.10"
+mime_guess = "2.0"

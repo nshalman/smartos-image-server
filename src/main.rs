@@ -539,19 +539,27 @@ async fn dataset_id_path(
         ));
     }
 
-    // TODO: Optimize to use streaming instead of loading entire file into memory
-    // Current implementation loads the full file for simplicity, but could be
-    // optimized using ReaderStream + http-body-util for large files
-    let file_content = async_fs::read(&file_path)
-        .await
-        .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
+    let file = async_fs::File::open(&file_path).await.map_err(|e| {
+        HttpError::for_bad_request(None, format!("failed to read file {:?}: {:#}", file_path, e))
+    })?;
 
-    let body = Body::with_content(file_content.clone());
+    let metadata = file.metadata().await.map_err(|e| {
+        HttpError::for_internal_error(format!("Failed to get file metadata: {}", e))
+    })?;
+
+    let file_access = hyper_staticfile::vfs::TokioFileAccess::new(file);
+    let file_stream = hyper_staticfile::util::FileBytesStream::new(file_access);
+    let body = Body::wrap(hyper_staticfile::Body::Full(file_stream));
+
+    // Derive the MIME type from the file name
+    let content_type = mime_guess::from_path(&file_path)
+        .first()
+        .map_or_else(|| "application/octet-stream".to_string(), |m| m.to_string());
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/octet-stream")
-        .header("Content-Length", file_content.len().to_string())
+        .header("Content-Type", content_type)
+        .header("Content-Length", metadata.len().to_string())
         .body(body)?)
 }
 
@@ -591,11 +599,16 @@ async fn dataset_id_path_head(
         .await
         .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
 
+    // Derive the MIME type from the file name
+    let content_type = mime_guess::from_path(&file_path)
+        .first()
+        .map_or_else(|| "application/octet-stream".to_string(), |m| m.to_string());
+
     let body = Body::empty();
 
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/octet-stream")
+        .header("Content-Type", content_type)
         .header("Content-Length", metadata.len().to_string())
         .body(body)?)
 }
