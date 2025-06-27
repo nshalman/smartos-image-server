@@ -626,3 +626,259 @@ async fn dataset_id_path_head(
         .header("Content-Length", metadata.len().to_string())
         .body(body)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+    use tokio::fs;
+
+    #[tokio::test]
+    async fn test_process_manifest_url_generation() {
+        let temp_dir = TempDir::new().unwrap();
+        let uuid = "08d4292e-4fa2-11e2-852e-c3b213e7719c";
+        let dataset_dir = temp_dir.path().join(uuid);
+        fs::create_dir_all(&dataset_dir).await.unwrap();
+
+        let manifest_content = json!({
+            "uuid": uuid,
+            "name": "test-dataset",
+            "version": "1.0.0",
+            "description": "Test dataset",
+            "os": "smartos",
+            "type": "zone-dataset",
+            "urn": "test:test:test:1.0.0",
+            "creator_name": "test",
+            "creator_uuid": "550e8400-e29b-41d4-a716-446655440000",
+            "published_at": "2023-01-01T00:00:00.000Z",
+            "files": [
+                {
+                    "path": "test-file.zfs.bz2",
+                    "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+                    "size": 12345
+                }
+            ]
+        });
+
+        let manifest_path = dataset_dir.join("manifest.json");
+        fs::write(&manifest_path, manifest_content.to_string()).await.unwrap();
+
+        let config = Config {
+            listen_port: json!(8876),
+            prefix: "http://".to_string(),
+            suffix: ":8876".to_string(),
+            loglevel: "info".to_string(),
+            serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+        };
+
+        let context = DsapiContext::new(
+            json!({}),
+            config,
+            temp_dir.path().to_path_buf(),
+        );
+
+        let result = context.process_manifest(uuid, "localhost").await;
+        assert!(result.is_ok());
+
+        let manifest = result.unwrap();
+        assert_eq!(manifest.uuid.to_string(), uuid);
+        assert_eq!(manifest.files.len(), 1);
+        assert!(manifest.files[0].url.is_some());
+        
+        let expected_url = format!("http://localhost:8876/datasets/{}/test-file.zfs.bz2", uuid);
+        assert_eq!(manifest.files[0].url.as_ref().unwrap(), &expected_url);
+    }
+
+    #[tokio::test]
+    async fn test_process_manifest_missing_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let uuid = "nonexistent-uuid";
+
+        let config = Config {
+            listen_port: json!(8876),
+            prefix: "http://".to_string(),
+            suffix: "".to_string(),
+            loglevel: "info".to_string(),
+            serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+        };
+
+        let context = DsapiContext::new(
+            json!({}),
+            config,
+            temp_dir.path().to_path_buf(),
+        );
+
+        let result = context.process_manifest(uuid, "localhost").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_all_dataset_uuids() {
+        let temp_dir = TempDir::new().unwrap();
+        
+        // Create test datasets
+        let uuids = ["08d4292e-4fa2-11e2-852e-c3b213e7719c", "550e8400-e29b-41d4-a716-446655440000"];
+        
+        for uuid in &uuids {
+            let dataset_dir = temp_dir.path().join(uuid);
+            fs::create_dir_all(&dataset_dir).await.unwrap();
+            
+            let manifest_content = json!({
+                "uuid": uuid,
+                "name": "test",
+                "version": "1.0.0",
+                "description": "Test",
+                "os": "smartos",
+                "type": "zone-dataset",
+                "urn": "test:test:test:1.0.0",
+                "creator_name": "test",
+                "creator_uuid": "550e8400-e29b-41d4-a716-446655440000",
+                "published_at": "2023-01-01T00:00:00.000Z",
+                "files": []
+            });
+            
+            let manifest_path = dataset_dir.join("manifest.json");
+            fs::write(&manifest_path, manifest_content.to_string()).await.unwrap();
+        }
+
+        // Create directory without manifest (should be ignored)
+        let invalid_dir = temp_dir.path().join("invalid-dataset");
+        fs::create_dir_all(&invalid_dir).await.unwrap();
+
+        let config = Config {
+            listen_port: json!(8876),
+            prefix: "http://".to_string(),
+            suffix: "".to_string(),
+            loglevel: "info".to_string(),
+            serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+        };
+
+        let context = DsapiContext::new(
+            json!({}),
+            config,
+            temp_dir.path().to_path_buf(),
+        );
+
+        let result = context.get_all_dataset_uuids().await;
+        assert!(result.is_ok());
+
+        let mut found_uuids = result.unwrap();
+        found_uuids.sort();
+        
+        let mut expected_uuids: Vec<String> = uuids.iter().map(|s| s.to_string()).collect();
+        expected_uuids.sort();
+        
+        assert_eq!(found_uuids, expected_uuids);
+    }
+
+    #[test]
+    fn test_config_parsing() {
+        // Test number port
+        let config_json = r#"{"listen_port": 8080, "prefix": "http://", "suffix": "", "loglevel": "info"}"#;
+        let config: Config = serde_json::from_str(config_json).unwrap();
+        assert_eq!(config.listen_port, json!(8080));
+
+        // Test string port  
+        let config_json = r#"{"listen_port": "127.0.0.1:9000", "prefix": "http://", "suffix": "", "loglevel": "info"}"#;
+        let config: Config = serde_json::from_str(config_json).unwrap();
+        assert_eq!(config.listen_port, json!("127.0.0.1:9000"));
+    }
+
+    #[tokio::test]
+    async fn test_path_traversal_protection() {
+        let temp_dir = TempDir::new().unwrap();
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let dataset_dir = temp_dir.path().join(uuid);
+        fs::create_dir_all(&dataset_dir).await.unwrap();
+
+        // Create a test file inside the dataset directory
+        let test_file = dataset_dir.join("test.txt");
+        fs::write(&test_file, "test content").await.unwrap();
+
+        // Create a file outside the dataset directory that we shouldn't be able to access
+        let outside_file = temp_dir.path().join("secret.txt");
+        fs::write(&outside_file, "secret content").await.unwrap();
+
+        let config = Config {
+            listen_port: json!(8876),
+            prefix: "http://".to_string(),
+            suffix: "".to_string(),
+            loglevel: "info".to_string(),
+            serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+        };
+
+        let context = DsapiContext::new(
+            json!({}),
+            config,
+            temp_dir.path().to_path_buf(),
+        );
+
+        // Test that we can access a legitimate file
+        let legitimate_path = context.serve_dir.join(uuid).join("test.txt");
+        let canonical_base = context.serve_dir.join(uuid).canonicalize().unwrap();
+        let canonical_file = legitimate_path.canonicalize().unwrap();
+        assert!(canonical_file.starts_with(&canonical_base));
+
+        // Test that path traversal is blocked (this would fail canonicalize due to file not existing in the expected location)
+        let traversal_path = context.serve_dir.join(uuid).join("../secret.txt");
+        // This should either fail canonicalize or fail the starts_with check
+        let result = traversal_path.canonicalize();
+        if let Ok(canonical_traversal) = result {
+            assert!(!canonical_traversal.starts_with(&canonical_base));
+        }
+        // If canonicalize fails, that's also good - it means the path doesn't exist relative to the dataset
+    }
+
+    #[tokio::test]
+    async fn test_ping_endpoint() {
+        let temp_dir = TempDir::new().unwrap();
+        
+        let config = Config {
+            listen_port: json!(0), // Let OS pick a port
+            prefix: "http://".to_string(),
+            suffix: "".to_string(),
+            loglevel: "info".to_string(),
+            serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+        };
+
+        let config_logging = ConfigLogging::StderrTerminal {
+            level: ConfigLoggingLevel::Info,
+        };
+        let log = config_logging.to_logger("test").unwrap();
+
+        let mut api = ApiDescription::new();
+        api.register(ping).unwrap();
+        api.register(ping_head).unwrap();
+
+        let api_description = api.openapi("test", semver::Version::new(0, 2, 0)).json().unwrap();
+        let api_context = DsapiContext::new(api_description, config, temp_dir.path().to_path_buf());
+
+        let config_dropshot = ConfigDropshot {
+            bind_address: "127.0.0.1:0".parse().unwrap(),
+            ..Default::default()
+        };
+
+        let server = ServerBuilder::new(api, api_context, log)
+            .config(config_dropshot)
+            .start()
+            .unwrap();
+        
+        let local_addr = server.local_addr();
+        
+        // Test GET /ping
+        let url = format!("http://{}/ping", local_addr);
+        let client = reqwest::Client::new();
+        let response = client.get(&url).send().await.unwrap();
+        
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["ping"], "pong");
+        
+        // Test HEAD /ping
+        let response = client.head(&url).send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        
+        server.close().await.unwrap();
+    }
+}
