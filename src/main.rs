@@ -93,11 +93,17 @@ async fn main() -> Result<(), String> {
     */
     let mut api = ApiDescription::new();
     api.register(testme).unwrap();
+    api.register(testme_head).unwrap();
     api.register(slash).unwrap();
+    api.register(slash_head).unwrap();
     api.register(ping).unwrap();
+    api.register(ping_head).unwrap();
     api.register(datasets).unwrap();
+    api.register(datasets_head).unwrap();
     api.register(dataset_id).unwrap();
+    api.register(dataset_id_head).unwrap();
     api.register(dataset_id_path).unwrap();
+    api.register(dataset_id_path_head).unwrap();
 
     /*
      * The functions that implement our API endpoints will share this context.
@@ -154,13 +160,6 @@ impl DsapiContext {
         }
     }
 
-    /**
-     * Given `rqctx` (which is provided by Dropshot to all HTTP handler
-     * functions), return our application-specific context.
-     */
-    pub fn from_rqctx(rqctx: &RequestContext<DsapiContext>) -> &DsapiContext {
-        rqctx.context()
-    }
 
     /**
      * Process a manifest file, adding URL properties and validating
@@ -223,12 +222,31 @@ async fn slash(rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<Str
     Ok(HttpResponseOk(context.api.to_string()))
 }
 
+/** HEAD support for API description*/
+#[endpoint {
+    method = HEAD,
+    path = "/",
+}]
+async fn slash_head(rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<String>, HttpError> {
+    let context = rqctx.context();
+    Ok(HttpResponseOk(context.api.to_string()))
+}
+
 /** Test Function*/
 #[endpoint {
     method = GET,
     path = "/test",
 }]
 async fn testme(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<String>, HttpError> {
+    Ok(HttpResponseOk("Okay".to_string()))
+}
+
+/** HEAD support for test function*/
+#[endpoint {
+    method = HEAD,
+    path = "/test",
+}]
+async fn testme_head(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<String>, HttpError> {
     Ok(HttpResponseOk("Okay".to_string()))
 }
 
@@ -244,6 +262,16 @@ struct Ping {
     path = "/ping",
 }]
 async fn ping(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<Ping>, HttpError> {
+    let pong = "pong".to_string();
+    Ok(HttpResponseOk(Ping { ping: pong }))
+}
+
+/** HEAD support for ping*/
+#[endpoint {
+    method = HEAD,
+    path = "/ping",
+}]
+async fn ping_head(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<Ping>, HttpError> {
     let pong = "pong".to_string();
     Ok(HttpResponseOk(Ping { ping: pong }))
 }
@@ -343,12 +371,73 @@ async fn datasets(
     Ok(HttpResponseOk(manifests))
 }
 
+/** HEAD support for datasets list*/
+#[endpoint {
+    method = HEAD,
+    path = "/datasets",
+}]
+async fn datasets_head(
+    rqctx: RequestContext<DsapiContext>,
+) -> Result<HttpResponseOk<Vec<Manifest>>, HttpError> {
+    let context = rqctx.context();
+    let host = rqctx.request.headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost");
+    
+    let uuids = context.get_all_dataset_uuids().await
+        .map_err(|e| HttpError::for_internal_error(format!("Failed to get dataset list: {}", e)))?;
+    
+    let mut manifests = Vec::new();
+    
+    for uuid in uuids {
+        match context.process_manifest(&uuid, host).await {
+            Ok(manifest) => manifests.push(manifest),
+            Err(e) => {
+                // Log error but continue with other manifests
+                eprintln!("Failed to process manifest for {}: {}", uuid, e);
+            }
+        }
+    }
+    
+    Ok(HttpResponseOk(manifests))
+}
+
 /** Get specific dataset manifest*/
 #[endpoint {
     method = GET,
     path = "/datasets/{id}",
 }]
 async fn dataset_id(
+    rqctx: RequestContext<DsapiContext>,
+    path_params: DropPath<DsapiId>,
+) -> Result<HttpResponseOk<Manifest>, HttpError> {
+    let context = rqctx.context();
+    let path_params = path_params.into_inner();
+    let host = rqctx.request.headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost");
+    
+    let uuid_str = path_params.id.to_string();
+    
+    context.process_manifest(&uuid_str, host).await
+        .map(HttpResponseOk)
+        .map_err(|e| {
+            if e.to_string().contains("No such file") {
+                HttpError::for_not_found(None, format!("Dataset {} not found", uuid_str))
+            } else {
+                HttpError::for_internal_error(format!("Failed to process manifest: {}", e))
+            }
+        })
+}
+
+/** HEAD support for specific dataset manifest*/
+#[endpoint {
+    method = HEAD,
+    path = "/datasets/{id}",
+}]
+async fn dataset_id_head(
     rqctx: RequestContext<DsapiContext>,
     path_params: DropPath<DsapiId>,
 ) -> Result<HttpResponseOk<Manifest>, HttpError> {
@@ -406,5 +495,42 @@ async fn dataset_id_path(
         .status(StatusCode::OK)
         .header("Content-Type", "application/octet-stream")
         .header("Content-Length", file_content.len().to_string())
+        .body(body)?)
+}
+
+/** HEAD support for dataset files*/
+#[endpoint {
+    method = HEAD,
+    path = "/datasets/{id}/{path}",
+    unpublished = true,
+}]
+async fn dataset_id_path_head(
+    rqctx: RequestContext<DsapiContext>,
+    path_params: DropPath<DsapiIdPath>,
+) -> Result<Response<Body>, HttpError> {
+    let context = rqctx.context();
+    let path_params = path_params.into_inner();
+    let uuid_str = path_params.id.to_string();
+    let file_path = context.serve_dir.join(&uuid_str).join(&path_params.path);
+    
+    // Security check: ensure the file is within the dataset directory
+    let canonical_base = context.serve_dir.join(&uuid_str).canonicalize()
+        .map_err(|_| HttpError::for_not_found(None, "Dataset not found".to_string()))?;
+    let canonical_file = file_path.canonicalize()
+        .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
+    
+    if !canonical_file.starts_with(&canonical_base) {
+        return Err(HttpError::for_bad_request(None, "Invalid file path".to_string()));
+    }
+    
+    let metadata = async_fs::metadata(&file_path).await
+        .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
+    
+    let body = Body::empty();
+    
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", metadata.len().to_string())
         .body(body)?)
 }
