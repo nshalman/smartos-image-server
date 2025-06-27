@@ -346,7 +346,7 @@ struct Config {
 }]
 async fn datasets(
     rqctx: RequestContext<DsapiContext>,
-) -> Result<HttpResponseOk<Vec<Manifest>>, HttpError> {
+) -> Result<Response<Body>, HttpError> {
     let context = rqctx.context();
     let host = rqctx.request.headers()
         .get("host")
@@ -368,7 +368,18 @@ async fn datasets(
         }
     }
     
-    Ok(HttpResponseOk(manifests))
+    let json_body = serde_json::to_string(&manifests)
+        .map_err(|e| HttpError::for_internal_error(format!("JSON serialization failed: {}", e)))?;
+    let body = Body::with_content(json_body.clone());
+    
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .header("Content-Length", json_body.len().to_string())
+        .header("Access-Control-Allow-Headers", "Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token")
+        .header("Access-Control-Allow-Methods", "PUT, GET, POST, DELETE, OPTIONS")
+        .header("Access-Control-Allow-Origin", "*")
+        .body(body)?)
 }
 
 /** HEAD support for datasets list*/
