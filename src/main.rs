@@ -6,20 +6,20 @@
 //use anyhow::{Result, bail, anyhow};
 use getopts::Options;
 use schemars::JsonSchema;
+use semver;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use tokio::fs as async_fs;
 use std::vec::Vec;
+use tokio::fs as async_fs;
 use uuid::Uuid;
-use semver;
 
 use dropshot::{
-    endpoint, ApiDescription, ConfigLogging, ConfigLoggingLevel, HttpError,
-    HttpResponseOk, ServerBuilder, Path as DropPath, RequestContext, Body,
+    endpoint, ApiDescription, Body, ConfigLogging, ConfigLoggingLevel, HttpError, HttpResponseOk,
+    Path as DropPath, RequestContext, ServerBuilder,
 };
 use http::{Response, StatusCode};
 
@@ -60,12 +60,10 @@ async fn main() -> Result<(), String> {
 
     let _bind = matches
         .opt_str("l")
-        .unwrap_or_else(|| {
-            match &config.listen_port {
-                serde_json::Value::Number(n) => format!("0.0.0.0:{}", n),
-                serde_json::Value::String(s) => s.clone(),
-                _ => String::from("0.0.0.0:8876")
-            }
+        .unwrap_or_else(|| match &config.listen_port {
+            serde_json::Value::Number(n) => format!("0.0.0.0:{}", n),
+            serde_json::Value::String(s) => s.clone(),
+            _ => String::from("0.0.0.0:8876"),
         });
 
     // TODO: Use bind address from config instead of default
@@ -112,7 +110,7 @@ async fn main() -> Result<(), String> {
         .openapi("dsapi", semver::Version::new(0, 2, 0))
         .json()
         .map_err(|e| e.to_string())?;
-        //.to_string();
+    //.to_string();
     let api_context = DsapiContext::new(api_description, config, serve_dir);
 
     /* How to emit my API at startup:
@@ -153,49 +151,60 @@ impl DsapiContext {
      * Return a new DsapiContext.
      */
     pub fn new(a: Value, config: Config, serve_dir: PathBuf) -> DsapiContext {
-        DsapiContext { 
-            api: a, 
+        DsapiContext {
+            api: a,
             config,
             serve_dir,
         }
     }
 
-
     /**
      * Process a manifest file, adding URL properties and validating
      */
-    async fn process_manifest(&self, uuid: &str, host: &str) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
+    async fn process_manifest(
+        &self,
+        uuid: &str,
+        host: &str,
+    ) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
         let manifest_path = self.serve_dir.join(uuid).join("manifest.json");
-        
-        let manifest_content = async_fs::read_to_string(&manifest_path).await
+
+        let manifest_content = async_fs::read_to_string(&manifest_path)
+            .await
             .map_err(|e| format!("Failed to read manifest for {}: {}", uuid, e))?;
-            
+
         let mut manifest: Manifest = serde_json::from_str(&manifest_content)
             .map_err(|e| format!("Failed to parse manifest for {}: {}", uuid, e))?;
-            
+
         // Update file URLs
-        let url_prefix = format!("{}{}{}/datasets/{}/", 
-            self.config.prefix, host, self.config.suffix, uuid);
-            
+        let url_prefix = format!(
+            "{}{}{}/datasets/{}/",
+            self.config.prefix, host, self.config.suffix, uuid
+        );
+
         for file in &mut manifest.files {
             file.url = Some(format!("{}{}", url_prefix, file.path));
         }
-        
+
         Ok(manifest)
     }
-    
+
     /**
      * Get all dataset UUIDs by scanning the serve directory
      */
-    async fn get_all_dataset_uuids(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut entries = async_fs::read_dir(&self.serve_dir).await
+    async fn get_all_dataset_uuids(
+        &self,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut entries = async_fs::read_dir(&self.serve_dir)
+            .await
             .map_err(|e| format!("Failed to read serve directory: {}", e))?;
-            
+
         let mut uuids = Vec::new();
-        
-        while let Some(entry) = entries.next_entry().await
-            .map_err(|e| format!("Failed to read directory entry: {}", e))? {
-            
+
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("Failed to read directory entry: {}", e))?
+        {
             if let Some(name) = entry.file_name().to_str() {
                 let manifest_path = entry.path().join("manifest.json");
                 if async_fs::metadata(&manifest_path).await.is_ok() {
@@ -203,7 +212,7 @@ impl DsapiContext {
                 }
             }
         }
-        
+
         Ok(uuids)
     }
 }
@@ -227,7 +236,9 @@ async fn slash(rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<Str
     method = HEAD,
     path = "/",
 }]
-async fn slash_head(rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<String>, HttpError> {
+async fn slash_head(
+    rqctx: RequestContext<DsapiContext>,
+) -> Result<HttpResponseOk<String>, HttpError> {
     let context = rqctx.context();
     Ok(HttpResponseOk(context.api.to_string()))
 }
@@ -246,7 +257,9 @@ async fn testme(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<S
     method = HEAD,
     path = "/test",
 }]
-async fn testme_head(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<String>, HttpError> {
+async fn testme_head(
+    _rqctx: RequestContext<DsapiContext>,
+) -> Result<HttpResponseOk<String>, HttpError> {
     Ok(HttpResponseOk("Okay".to_string()))
 }
 
@@ -271,7 +284,9 @@ async fn ping(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<Pin
     method = HEAD,
     path = "/ping",
 }]
-async fn ping_head(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<Ping>, HttpError> {
+async fn ping_head(
+    _rqctx: RequestContext<DsapiContext>,
+) -> Result<HttpResponseOk<Ping>, HttpError> {
     let pong = "pong".to_string();
     Ok(HttpResponseOk(Ping { ping: pong }))
 }
@@ -300,7 +315,7 @@ struct Manifest {
     creator_name: String,
     creator_uuid: Uuid,
     published_at: String,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     platform_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -315,7 +330,7 @@ struct Manifest {
     image_size: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     requirements: Option<serde_json::Value>,
-    
+
     files: Vec<ManifestFile>,
 }
 
@@ -326,7 +341,7 @@ struct DsapiId {
 
 #[derive(Deserialize, JsonSchema)]
 struct DsapiIdPath {
-    id: Uuid, // TODO: Convert UUID path param parsing properly  
+    id: Uuid, // TODO: Convert UUID path param parsing properly
     path: String,
 }
 
@@ -344,20 +359,22 @@ struct Config {
     method = GET,
     path = "/datasets",
 }]
-async fn datasets(
-    rqctx: RequestContext<DsapiContext>,
-) -> Result<Response<Body>, HttpError> {
+async fn datasets(rqctx: RequestContext<DsapiContext>) -> Result<Response<Body>, HttpError> {
     let context = rqctx.context();
-    let host = rqctx.request.headers()
+    let host = rqctx
+        .request
+        .headers()
         .get("host")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
-    
-    let uuids = context.get_all_dataset_uuids().await
+
+    let uuids = context
+        .get_all_dataset_uuids()
+        .await
         .map_err(|e| HttpError::for_internal_error(format!("Failed to get dataset list: {}", e)))?;
-    
+
     let mut manifests = Vec::new();
-    
+
     for uuid in uuids {
         match context.process_manifest(&uuid, host).await {
             Ok(manifest) => manifests.push(manifest),
@@ -367,17 +384,23 @@ async fn datasets(
             }
         }
     }
-    
+
     let json_body = serde_json::to_string(&manifests)
         .map_err(|e| HttpError::for_internal_error(format!("JSON serialization failed: {}", e)))?;
     let body = Body::with_content(json_body.clone());
-    
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
         .header("Content-Length", json_body.len().to_string())
-        .header("Access-Control-Allow-Headers", "Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token")
-        .header("Access-Control-Allow-Methods", "PUT, GET, POST, DELETE, OPTIONS")
+        .header(
+            "Access-Control-Allow-Headers",
+            "Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token",
+        )
+        .header(
+            "Access-Control-Allow-Methods",
+            "PUT, GET, POST, DELETE, OPTIONS",
+        )
         .header("Access-Control-Allow-Origin", "*")
         .body(body)?)
 }
@@ -391,16 +414,20 @@ async fn datasets_head(
     rqctx: RequestContext<DsapiContext>,
 ) -> Result<HttpResponseOk<Vec<Manifest>>, HttpError> {
     let context = rqctx.context();
-    let host = rqctx.request.headers()
+    let host = rqctx
+        .request
+        .headers()
         .get("host")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
-    
-    let uuids = context.get_all_dataset_uuids().await
+
+    let uuids = context
+        .get_all_dataset_uuids()
+        .await
         .map_err(|e| HttpError::for_internal_error(format!("Failed to get dataset list: {}", e)))?;
-    
+
     let mut manifests = Vec::new();
-    
+
     for uuid in uuids {
         match context.process_manifest(&uuid, host).await {
             Ok(manifest) => manifests.push(manifest),
@@ -410,7 +437,7 @@ async fn datasets_head(
             }
         }
     }
-    
+
     Ok(HttpResponseOk(manifests))
 }
 
@@ -425,14 +452,18 @@ async fn dataset_id(
 ) -> Result<HttpResponseOk<Manifest>, HttpError> {
     let context = rqctx.context();
     let path_params = path_params.into_inner();
-    let host = rqctx.request.headers()
+    let host = rqctx
+        .request
+        .headers()
         .get("host")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
-    
+
     let uuid_str = path_params.id.to_string();
-    
-    context.process_manifest(&uuid_str, host).await
+
+    context
+        .process_manifest(&uuid_str, host)
+        .await
         .map(HttpResponseOk)
         .map_err(|e| {
             if e.to_string().contains("No such file") {
@@ -454,14 +485,18 @@ async fn dataset_id_head(
 ) -> Result<HttpResponseOk<Manifest>, HttpError> {
     let context = rqctx.context();
     let path_params = path_params.into_inner();
-    let host = rqctx.request.headers()
+    let host = rqctx
+        .request
+        .headers()
         .get("host")
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
-    
+
     let uuid_str = path_params.id.to_string();
-    
-    context.process_manifest(&uuid_str, host).await
+
+    context
+        .process_manifest(&uuid_str, host)
+        .await
         .map(HttpResponseOk)
         .map_err(|e| {
             if e.to_string().contains("No such file") {
@@ -486,22 +521,33 @@ async fn dataset_id_path(
     let path_params = path_params.into_inner();
     let uuid_str = path_params.id.to_string();
     let file_path = context.serve_dir.join(&uuid_str).join(&path_params.path);
-    
+
     // Security check: ensure the file is within the dataset directory
-    let canonical_base = context.serve_dir.join(&uuid_str).canonicalize()
+    let canonical_base = context
+        .serve_dir
+        .join(&uuid_str)
+        .canonicalize()
         .map_err(|_| HttpError::for_not_found(None, "Dataset not found".to_string()))?;
-    let canonical_file = file_path.canonicalize()
+    let canonical_file = file_path
+        .canonicalize()
         .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
-    
+
     if !canonical_file.starts_with(&canonical_base) {
-        return Err(HttpError::for_bad_request(None, "Invalid file path".to_string()));
+        return Err(HttpError::for_bad_request(
+            None,
+            "Invalid file path".to_string(),
+        ));
     }
-    
-    let file_content = async_fs::read(&file_path).await
+
+    // TODO: Optimize to use streaming instead of loading entire file into memory
+    // Current implementation loads the full file for simplicity, but could be
+    // optimized using ReaderStream + http-body-util for large files
+    let file_content = async_fs::read(&file_path)
+        .await
         .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
-    
+
     let body = Body::with_content(file_content.clone());
-    
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/octet-stream")
@@ -523,22 +569,30 @@ async fn dataset_id_path_head(
     let path_params = path_params.into_inner();
     let uuid_str = path_params.id.to_string();
     let file_path = context.serve_dir.join(&uuid_str).join(&path_params.path);
-    
+
     // Security check: ensure the file is within the dataset directory
-    let canonical_base = context.serve_dir.join(&uuid_str).canonicalize()
+    let canonical_base = context
+        .serve_dir
+        .join(&uuid_str)
+        .canonicalize()
         .map_err(|_| HttpError::for_not_found(None, "Dataset not found".to_string()))?;
-    let canonical_file = file_path.canonicalize()
+    let canonical_file = file_path
+        .canonicalize()
         .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
-    
+
     if !canonical_file.starts_with(&canonical_base) {
-        return Err(HttpError::for_bad_request(None, "Invalid file path".to_string()));
+        return Err(HttpError::for_bad_request(
+            None,
+            "Invalid file path".to_string(),
+        ));
     }
-    
-    let metadata = async_fs::metadata(&file_path).await
+
+    let metadata = async_fs::metadata(&file_path)
+        .await
         .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
-    
+
     let body = Body::empty();
-    
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/octet-stream")
