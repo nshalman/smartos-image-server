@@ -9,16 +9,19 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use std::any::Any;
 use std::env;
-use std::sync::Arc;
+use std::fs;
+use std::path::PathBuf;
+use tokio::fs as async_fs;
 use std::vec::Vec;
 use uuid::Uuid;
+use semver;
 
 use dropshot::{
-    endpoint, ApiDescription, ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpError,
-    HttpResponseOk, HttpServer, Path, RequestContext,
+    endpoint, ApiDescription, ConfigLogging, ConfigLoggingLevel, HttpError,
+    HttpResponseOk, ServerBuilder, Path as DropPath, RequestContext, Body,
 };
+use http::{Response, StatusCode};
 
 /*#[macro_use]
 extern crate slog;
@@ -34,7 +37,7 @@ async fn main() -> Result<(), String> {
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
         Err(f) => {
-            panic!(f.to_string())
+            panic!("{}", f.to_string())
         }
     };
     if matches.opt_present("h") {
@@ -42,14 +45,30 @@ async fn main() -> Result<(), String> {
         print!("{}", opts.usage(&brief));
         std::process::exit(0);
     }
-    let bind = matches
-        .opt_str("l")
-        .unwrap_or_else(|| String::from("0.0.0.0:8876"));
-
-    let config_dropshot = ConfigDropshot {
-        bind_address: bind.parse().unwrap(),
-        ..Default::default()
+    // Load configuration
+    let config: Config = {
+        let config_content = fs::read_to_string("config.json")
+            .map_err(|e| format!("Failed to read config.json: {}", e))?;
+        serde_json::from_str(&config_content)
+            .map_err(|e| format!("Failed to parse config.json: {}", e))?
     };
+
+    let serve_dir = match &config.serve_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => std::env::current_dir().unwrap(),
+    };
+
+    let _bind = matches
+        .opt_str("l")
+        .unwrap_or_else(|| {
+            match &config.listen_port {
+                serde_json::Value::Number(n) => format!("0.0.0.0:{}", n),
+                serde_json::Value::String(s) => s.clone(),
+                _ => String::from("0.0.0.0:8876")
+            }
+        });
+
+    // TODO: Use bind address from config instead of default
 
     /*
      * For simplicity, we'll configure an "info"-level logger that writes to
@@ -84,11 +103,11 @@ async fn main() -> Result<(), String> {
      * The functions that implement our API endpoints will share this context.
      */
     let api_description = api
-        .openapi("dsapi", "")
+        .openapi("dsapi", semver::Version::new(0, 2, 0))
         .json()
         .map_err(|e| e.to_string())?;
         //.to_string();
-    let api_context = DsapiContext::new(api_description);
+    let api_context = DsapiContext::new(api_description, config, serve_dir);
 
     /* How to emit my API at startup:
     api.print_openapi(
@@ -107,36 +126,86 @@ async fn main() -> Result<(), String> {
     println!(""); // flush stdout with an extra newline
      */
 
-    let mut server = HttpServer::new(&config_dropshot, api, api_context, &log)
+    let server = ServerBuilder::new(api, api_context, log)
+        .start()
         .map_err(|error| format!("failed to create server: {}", error))?;
-    let server_task = server.run();
 
-    server.wait_for_shutdown(server_task).await
+    server.await
 }
 
 /**
- * Application-specific example context (state shared by handler functions)
+ * Application-specific context (state shared by handler functions)
  */
 struct DsapiContext {
     api: Value,
+    config: Config,
+    serve_dir: PathBuf,
 }
 
 impl DsapiContext {
     /**
      * Return a new DsapiContext.
      */
-    pub fn new(a: Value) -> Arc<DsapiContext> {
-        Arc::new(DsapiContext { api: a })
+    pub fn new(a: Value, config: Config, serve_dir: PathBuf) -> DsapiContext {
+        DsapiContext { 
+            api: a, 
+            config,
+            serve_dir,
+        }
     }
 
     /**
      * Given `rqctx` (which is provided by Dropshot to all HTTP handler
      * functions), return our application-specific context.
      */
-    pub fn from_rqctx(rqctx: &Arc<RequestContext>) -> Arc<DsapiContext> {
-        let ctx: Arc<dyn Any + Send + Sync + 'static> = Arc::clone(&rqctx.server.private);
-        ctx.downcast::<DsapiContext>()
-            .expect("wrong type for private data")
+    pub fn from_rqctx(rqctx: &RequestContext<DsapiContext>) -> &DsapiContext {
+        rqctx.context()
+    }
+
+    /**
+     * Process a manifest file, adding URL properties and validating
+     */
+    async fn process_manifest(&self, uuid: &str, host: &str) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
+        let manifest_path = self.serve_dir.join(uuid).join("manifest.json");
+        
+        let manifest_content = async_fs::read_to_string(&manifest_path).await
+            .map_err(|e| format!("Failed to read manifest for {}: {}", uuid, e))?;
+            
+        let mut manifest: Manifest = serde_json::from_str(&manifest_content)
+            .map_err(|e| format!("Failed to parse manifest for {}: {}", uuid, e))?;
+            
+        // Update file URLs
+        let url_prefix = format!("{}{}{}/datasets/{}/", 
+            self.config.prefix, host, self.config.suffix, uuid);
+            
+        for file in &mut manifest.files {
+            file.url = Some(format!("{}{}", url_prefix, file.path));
+        }
+        
+        Ok(manifest)
+    }
+    
+    /**
+     * Get all dataset UUIDs by scanning the serve directory
+     */
+    async fn get_all_dataset_uuids(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut entries = async_fs::read_dir(&self.serve_dir).await
+            .map_err(|e| format!("Failed to read serve directory: {}", e))?;
+            
+        let mut uuids = Vec::new();
+        
+        while let Some(entry) = entries.next_entry().await
+            .map_err(|e| format!("Failed to read directory entry: {}", e))? {
+            
+            if let Some(name) = entry.file_name().to_str() {
+                let manifest_path = entry.path().join("manifest.json");
+                if async_fs::metadata(&manifest_path).await.is_ok() {
+                    uuids.push(name.to_string());
+                }
+            }
+        }
+        
+        Ok(uuids)
     }
 }
 
@@ -149,8 +218,8 @@ impl DsapiContext {
     method = GET,
     path = "/",
 }]
-async fn slash(rqctx: Arc<RequestContext>) -> Result<HttpResponseOk<String>, HttpError> {
-    let context = DsapiContext::from_rqctx(&rqctx);
+async fn slash(rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<String>, HttpError> {
+    let context = rqctx.context();
     Ok(HttpResponseOk(context.api.to_string()))
 }
 
@@ -159,8 +228,7 @@ async fn slash(rqctx: Arc<RequestContext>) -> Result<HttpResponseOk<String>, Htt
     method = GET,
     path = "/test",
 }]
-async fn testme(rqctx: Arc<RequestContext>) -> Result<HttpResponseOk<String>, HttpError> {
-    //info!(rqctx.log, "Hello There {:?}", &rqctx.request.get_mut());
+async fn testme(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<String>, HttpError> {
     Ok(HttpResponseOk("Okay".to_string()))
 }
 
@@ -175,54 +243,72 @@ struct Ping {
     method = GET,
     path = "/ping",
 }]
-async fn ping(_rqctx: Arc<RequestContext>) -> Result<HttpResponseOk<Ping>, HttpError> {
+async fn ping(_rqctx: RequestContext<DsapiContext>) -> Result<HttpResponseOk<Ping>, HttpError> {
     let pong = "pong".to_string();
     Ok(HttpResponseOk(Ping { ping: pong }))
 }
 
-/** Represents the files for a dataset in dsapi */
-#[derive(Serialize, JsonSchema)]
-struct Files {
+/** Represents a file in a dataset manifest */
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+struct ManifestFile {
     path: String,
     sha1: String,
     size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
 }
 
-/** Represents a dataset in dsapi */
-#[derive(Serialize, JsonSchema)]
+/** Represents a dataset manifest */
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
 struct Manifest {
     uuid: Uuid,
     name: String,
     version: String,
     description: String,
-
     os: String,
-    r#type: String,
-    platform_type: String,
-    cloud_name: String,
+    #[serde(rename = "type")]
+    manifest_type: String,
     urn: String,
-
     creator_name: String,
     creator_uuid: Uuid,
-    vendor_uuid: Uuid,
-
-    created_at: String,
-    updated_at: String,
     published_at: String,
-
-    files: Files,
+    
+    #[serde(skip_serializing_if = "Option::is_none")]
+    platform_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cloud_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vendor_uuid: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_size: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requirements: Option<serde_json::Value>,
+    
+    files: Vec<ManifestFile>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct DsapiId {
-    id: Uuid,
+    id: Uuid, // TODO: Convert UUID path param parsing properly
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct DsapiIdPath {
-    id: Uuid,
+    id: Uuid, // TODO: Convert UUID path param parsing properly  
     path: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct Config {
+    listen_port: serde_json::Value,
+    prefix: String,
+    suffix: String,
+    loglevel: String,
+    serve_dir: Option<String>,
 }
 
 /** Get all datasets on this server*/
@@ -231,37 +317,94 @@ struct DsapiIdPath {
     path = "/datasets",
 }]
 async fn datasets(
-    _rqctx: Arc<RequestContext>,
-) -> Result<HttpResponseOk<Option<Vec<Manifest>>>, HttpError> {
-    Ok(HttpResponseOk(None))
+    rqctx: RequestContext<DsapiContext>,
+) -> Result<HttpResponseOk<Vec<Manifest>>, HttpError> {
+    let context = rqctx.context();
+    let host = rqctx.request.headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost");
+    
+    let uuids = context.get_all_dataset_uuids().await
+        .map_err(|e| HttpError::for_internal_error(format!("Failed to get dataset list: {}", e)))?;
+    
+    let mut manifests = Vec::new();
+    
+    for uuid in uuids {
+        match context.process_manifest(&uuid, host).await {
+            Ok(manifest) => manifests.push(manifest),
+            Err(e) => {
+                // Log error but continue with other manifests
+                eprintln!("Failed to process manifest for {}: {}", uuid, e);
+            }
+        }
+    }
+    
+    Ok(HttpResponseOk(manifests))
 }
 
-/** Get all datasets on this server*/
+/** Get specific dataset manifest*/
 #[endpoint {
     method = GET,
-    path = "/dataset/{id}",
+    path = "/datasets/{id}",
 }]
 async fn dataset_id(
-    _rqctx: Arc<RequestContext>,
-    path_params: Path<DsapiId>,
-) -> Result<HttpResponseOk<String>, HttpError> {
-    //) -> Result<HttpResponseOk<Option<Manifest>>, HttpError> {
+    rqctx: RequestContext<DsapiContext>,
+    path_params: DropPath<DsapiId>,
+) -> Result<HttpResponseOk<Manifest>, HttpError> {
+    let context = rqctx.context();
     let path_params = path_params.into_inner();
-    Ok(HttpResponseOk(path_params.id.to_string()))
+    let host = rqctx.request.headers()
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost");
+    
+    let uuid_str = path_params.id.to_string();
+    
+    context.process_manifest(&uuid_str, host).await
+        .map(HttpResponseOk)
+        .map_err(|e| {
+            if e.to_string().contains("No such file") {
+                HttpError::for_not_found(None, format!("Dataset {} not found", uuid_str))
+            } else {
+                HttpError::for_internal_error(format!("Failed to process manifest: {}", e))
+            }
+        })
 }
 
-/** Get all datasets on this server*/
+/** Serve dataset file*/
 #[endpoint {
     method = GET,
-    path = "/dataset/{id}/{path}",
+    path = "/datasets/{id}/{path}",
+    unpublished = true,
 }]
 async fn dataset_id_path(
-    _rqctx: Arc<RequestContext>,
-    path_params: Path<DsapiIdPath>,
-    //) -> Result<HttpResponseOk<Option<Vec<Manifest>>>, HttpError> {
-) -> Result<HttpResponseOk<String>, HttpError> {
+    rqctx: RequestContext<DsapiContext>,
+    path_params: DropPath<DsapiIdPath>,
+) -> Result<Response<Body>, HttpError> {
+    let context = rqctx.context();
     let path_params = path_params.into_inner();
-    let mut reply: String = path_params.id.to_string();
-    reply.push_str(&path_params.path);
-    Ok(HttpResponseOk(reply))
+    let uuid_str = path_params.id.to_string();
+    let file_path = context.serve_dir.join(&uuid_str).join(&path_params.path);
+    
+    // Security check: ensure the file is within the dataset directory
+    let canonical_base = context.serve_dir.join(&uuid_str).canonicalize()
+        .map_err(|_| HttpError::for_not_found(None, "Dataset not found".to_string()))?;
+    let canonical_file = file_path.canonicalize()
+        .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
+    
+    if !canonical_file.starts_with(&canonical_base) {
+        return Err(HttpError::for_bad_request(None, "Invalid file path".to_string()));
+    }
+    
+    let file_content = async_fs::read(&file_path).await
+        .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
+    
+    let body = Body::with_content(file_content.clone());
+    
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/octet-stream")
+        .header("Content-Length", file_content.len().to_string())
+        .body(body)?)
 }

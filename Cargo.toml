@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1"
-dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "master" }
+dropshot = { git = "https://github.com/nshalman/dropshot", branch = "otel-tracing" }
 getopts = "0.2"
 schemars = { version = "0.8", features = [ "uuid" ] }
 serde = { version = "1.0.0", features = [ "derive" ]}
@@ -20,3 +20,7 @@ slog-async = "2.4.0"
 slog-bunyan = "2.2.0"
 slog-json = "2.3.0"
 slog-term = "2.5.0"
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+futures = "0.3"
+semver = "1.0"
+http = "1.0"
