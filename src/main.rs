@@ -18,10 +18,11 @@ use tokio::fs as async_fs;
 use uuid::Uuid;
 
 use dropshot::{
-    endpoint, ApiDescription, Body, ConfigLogging, ConfigLoggingLevel, HttpError, HttpResponseOk,
+    endpoint, ApiDescription, Body, ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HttpError, HttpResponseOk,
     Path as DropPath, RequestContext, ServerBuilder,
 };
 use http::{Response, StatusCode};
+use std::net::SocketAddr;
 
 /*#[macro_use]
 extern crate slog;
@@ -58,16 +59,6 @@ async fn main() -> Result<(), String> {
         None => std::env::current_dir().unwrap(),
     };
 
-    let _bind = matches
-        .opt_str("l")
-        .unwrap_or_else(|| match &config.listen_port {
-            serde_json::Value::Number(n) => format!("0.0.0.0:{}", n),
-            serde_json::Value::String(s) => s.clone(),
-            _ => String::from("0.0.0.0:8876"),
-        });
-
-    // TODO: Use bind address from config instead of default
-
     /*
      * For simplicity, we'll configure an "info"-level logger that writes to
      * stderr assuming that it's a terminal.
@@ -103,6 +94,18 @@ async fn main() -> Result<(), String> {
     api.register(dataset_id_path).unwrap();
     api.register(dataset_id_path_head).unwrap();
 
+    // Get bind address from command line or config before moving config
+    let bind_config = matches
+        .opt_str("l")
+        .unwrap_or_else(|| match &config.listen_port {
+            serde_json::Value::Number(n) => format!("127.0.0.1:{}", n),
+            serde_json::Value::String(s) => {
+                // If it's a string, assume it's host:port format
+                s.clone()
+            },
+            _ => String::from("127.0.0.1:8876"),
+        });
+
     /*
      * The functions that implement our API endpoints will share this context.
      */
@@ -130,7 +133,18 @@ async fn main() -> Result<(), String> {
     println!(""); // flush stdout with an extra newline
      */
 
+    // Parse TCP bind address
+    let bind_address: SocketAddr = bind_config
+        .parse()
+        .map_err(|e| format!("Invalid bind address '{}': {}", bind_config, e))?;
+
+    let config_dropshot = ConfigDropshot {
+        bind_address,
+        ..Default::default()
+    };
+
     let server = ServerBuilder::new(api, api_context, log)
+        .config(config_dropshot)
         .start()
         .map_err(|error| format!("failed to create server: {}", error))?;
 
