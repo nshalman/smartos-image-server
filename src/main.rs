@@ -10,12 +10,15 @@ use semver;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::vec::Vec;
 use tokio::fs as async_fs;
 use tokio::io::AsyncReadExt;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use base64::Engine;
@@ -153,6 +156,20 @@ async fn main() -> Result<(), String> {
     server.await
 }
 
+/// Represents a discovered image on disk
+#[derive(Clone, Debug)]
+struct ImageEntry {
+    /// Path to the directory containing the image
+    dir_path: PathBuf,
+    /// Path to the manifest JSON file
+    manifest_path: PathBuf,
+    /// Path to the image file (non-JSON file)
+    image_file_path: Option<PathBuf>,
+}
+
+/// Index mapping UUIDs to their image entries
+type ImageIndex = HashMap<Uuid, ImageEntry>;
+
 /**
  * Application-specific context (state shared by handler functions)
  */
@@ -160,6 +177,8 @@ struct DsapiContext {
     api: Value,
     config: Config,
     serve_dir: PathBuf,
+    /// Cached index of images - rebuilt on demand
+    image_index: Arc<RwLock<ImageIndex>>,
 }
 
 impl DsapiContext {
@@ -171,65 +190,322 @@ impl DsapiContext {
             api: a,
             config,
             serve_dir,
+            image_index: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     /**
-     * Process a manifest file, adding URL properties and validating
+     * Scan a directory recursively for image manifests.
+     * Looks for .json files containing a "uuid" field.
+     */
+    async fn scan_for_images(
+        &self,
+    ) -> Result<ImageIndex, Box<dyn std::error::Error + Send + Sync>> {
+        let mut index = ImageIndex::new();
+        self.scan_directory(&self.serve_dir, &mut index).await?;
+        Ok(index)
+    }
+
+    /// Recursively scan a directory for manifests
+    fn scan_directory<'a>(
+        &'a self,
+        dir: &'a PathBuf,
+        index: &'a mut ImageIndex,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut entries = match async_fs::read_dir(dir).await {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("Failed to read directory {:?}: {}", dir, e);
+                    return Ok(());
+                }
+            };
+
+            let mut json_files = Vec::new();
+            let mut other_files = Vec::new();
+            let mut subdirs = Vec::new();
+
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let file_type = entry.file_type().await?;
+
+                if file_type.is_dir() {
+                    subdirs.push(path);
+                } else if file_type.is_file() {
+                    if let Some(ext) = path.extension() {
+                        if ext == "json" {
+                            json_files.push(path);
+                        } else {
+                            other_files.push(path);
+                        }
+                    } else {
+                        other_files.push(path);
+                    }
+                }
+            }
+
+            // Check each JSON file for a valid manifest with UUID
+            for json_path in json_files {
+                if let Ok(content) = async_fs::read_to_string(&json_path).await {
+                    // Try to parse and extract UUID
+                    if let Ok(parsed) = serde_json::from_str::<Value>(&content) {
+                        if let Some(uuid_str) = parsed.get("uuid").and_then(|v| v.as_str()) {
+                            if let Ok(uuid) = Uuid::parse_str(uuid_str) {
+                                // Found a valid manifest! Find the image file (non-JSON file in same dir)
+                                let image_file = other_files.first().cloned();
+
+                                let entry = ImageEntry {
+                                    dir_path: dir.clone(),
+                                    manifest_path: json_path,
+                                    image_file_path: image_file,
+                                };
+
+                                index.insert(uuid, entry);
+                                // Only process first valid manifest per directory
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Recurse into subdirectories
+            for subdir in subdirs {
+                self.scan_directory(&subdir, index).await?;
+            }
+
+            Ok(())
+        })
+    }
+
+    /// Refresh the image index
+    async fn refresh_index(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let new_index = self.scan_for_images().await?;
+        let mut index = self.image_index.write().await;
+        *index = new_index;
+        Ok(())
+    }
+
+    /// Get all UUIDs from the index (refreshes first)
+    async fn get_all_uuids(&self) -> Result<Vec<Uuid>, Box<dyn std::error::Error + Send + Sync>> {
+        self.refresh_index().await?;
+        let index = self.image_index.read().await;
+        Ok(index.keys().cloned().collect())
+    }
+
+    /// Get an image entry by UUID
+    async fn get_image_entry(&self, uuid: &Uuid) -> Option<ImageEntry> {
+        let index = self.image_index.read().await;
+        index.get(uuid).cloned()
+    }
+
+    /**
+     * Process a manifest file, adding URL properties
      */
     async fn process_manifest(
         &self,
-        uuid: &str,
+        uuid: &Uuid,
         host: &str,
     ) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
-        let manifest_path = self.serve_dir.join(uuid).join("manifest.json");
+        let entry = self.get_image_entry(uuid).await.ok_or_else(|| {
+            format!("No such file or directory: image {} not found", uuid)
+        })?;
 
-        let manifest_content = async_fs::read_to_string(&manifest_path)
+        let manifest_content = async_fs::read_to_string(&entry.manifest_path)
             .await
             .map_err(|e| format!("Failed to read manifest for {}: {}", uuid, e))?;
 
-        let mut manifest: Manifest = serde_json::from_str(&manifest_content)
+        // Parse as generic JSON first to handle different formats
+        let parsed: Value = serde_json::from_str(&manifest_content)
             .map_err(|e| format!("Failed to parse manifest for {}: {}", uuid, e))?;
 
-        // Update file URLs
+        // Build manifest from parsed data, handling both v1 and v2 formats
+        let manifest = self.build_manifest(&parsed, uuid, host, &entry)?;
+
+        Ok(manifest)
+    }
+
+    /// Build a Manifest struct from parsed JSON, handling different formats
+    fn build_manifest(
+        &self,
+        parsed: &Value,
+        uuid: &Uuid,
+        host: &str,
+        entry: &ImageEntry,
+    ) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
+        let name = parsed
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let version = parsed
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1.0.0")
+            .to_string();
+
+        let description = parsed
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let os = parsed
+            .get("os")
+            .and_then(|v| v.as_str())
+            .unwrap_or("linux")
+            .to_string();
+
+        let manifest_type = parsed
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("zone-dataset")
+            .to_string();
+
+        let published_at = parsed
+            .get("published_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1970-01-01T00:00:00Z")
+            .to_string();
+
+        // Generate URN if not present
+        let urn = parsed
+            .get("urn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("sdc:sdc:{}:{}", name, version));
+
+        // Creator info - use defaults for v2 format
+        let creator_name = parsed
+            .get("creator_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sdc")
+            .to_string();
+
+        let creator_uuid = parsed
+            .get("creator_uuid")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .or_else(|| {
+                parsed
+                    .get("owner")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok())
+            })
+            .unwrap_or_else(|| Uuid::parse_str("00000000-0000-0000-0000-000000000000").unwrap());
+
+        // Build files array
+        let mut files = Vec::new();
         let url_prefix = format!(
             "{}{}{}/images/{}/",
             self.config.prefix, host, self.config.suffix, uuid
         );
 
-        for file in &mut manifest.files {
-            file.url = Some(format!("{}{}", url_prefix, file.path));
-        }
+        if let Some(files_arr) = parsed.get("files").and_then(|v| v.as_array()) {
+            for (i, file_obj) in files_arr.iter().enumerate() {
+                let sha1 = file_obj
+                    .get("sha1")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
-        Ok(manifest)
-    }
+                let size = file_obj
+                    .get("size")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
 
-    /**
-     * Get all dataset UUIDs by scanning the serve directory
-     */
-    async fn get_all_dataset_uuids(
-        &self,
-    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut entries = async_fs::read_dir(&self.serve_dir)
-            .await
-            .map_err(|e| format!("Failed to read serve directory: {}", e))?;
+                // Try to get path from manifest, or derive from image file
+                let path = file_obj
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        // For v2 format, use the discovered image file name
+                        if i == 0 {
+                            entry
+                                .image_file_path
+                                .as_ref()
+                                .and_then(|p| p.file_name())
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "file".to_string());
 
-        let mut uuids = Vec::new();
+                let url = Some(format!("{}{}", url_prefix, path));
 
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| format!("Failed to read directory entry: {}", e))?
-        {
-            if let Some(name) = entry.file_name().to_str() {
-                let manifest_path = entry.path().join("manifest.json");
-                if async_fs::metadata(&manifest_path).await.is_ok() {
-                    uuids.push(name.to_string());
-                }
+                files.push(ManifestFile {
+                    path,
+                    sha1,
+                    size,
+                    url,
+                });
             }
         }
 
-        Ok(uuids)
+        // Optional fields
+        let platform_type = parsed
+            .get("platform_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let cloud_name = parsed
+            .get("cloud_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let vendor_uuid = parsed
+            .get("vendor_uuid")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
+
+        let created_at = parsed
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let updated_at = parsed
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let image_size = parsed
+            .get("image_size")
+            .map(|v| {
+                if let Some(n) = v.as_u64() {
+                    n.to_string()
+                } else if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    v.to_string()
+                }
+            });
+
+        let requirements = parsed.get("requirements").cloned();
+
+        Ok(Manifest {
+            uuid: *uuid,
+            name,
+            version,
+            description,
+            os,
+            manifest_type,
+            urn,
+            creator_name,
+            creator_uuid,
+            published_at,
+            platform_type,
+            cloud_name,
+            vendor_uuid,
+            created_at,
+            updated_at,
+            image_size,
+            requirements,
+            files,
+        })
     }
 }
 
@@ -387,7 +663,7 @@ async fn images(rqctx: RequestContext<DsapiContext>) -> Result<Response<Body>, H
         .unwrap_or("localhost");
 
     let uuids = context
-        .get_all_dataset_uuids()
+        .get_all_uuids()
         .await
         .map_err(|e| HttpError::for_internal_error(format!("Failed to get dataset list: {}", e)))?;
 
@@ -440,7 +716,7 @@ async fn images_head(
         .unwrap_or("localhost");
 
     let uuids = context
-        .get_all_dataset_uuids()
+        .get_all_uuids()
         .await
         .map_err(|e| HttpError::for_internal_error(format!("Failed to get dataset list: {}", e)))?;
 
@@ -477,15 +753,20 @@ async fn image_id(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
 
-    let uuid_str = path_params.id.to_string();
+    let uuid = path_params.id;
+
+    // Ensure index is populated
+    context.refresh_index().await.map_err(|e| {
+        HttpError::for_internal_error(format!("Failed to refresh index: {}", e))
+    })?;
 
     context
-        .process_manifest(&uuid_str, host)
+        .process_manifest(&uuid, host)
         .await
         .map(HttpResponseOk)
         .map_err(|e| {
-            if e.to_string().contains("No such file") {
-                HttpError::for_not_found(None, format!("Dataset {} not found", uuid_str))
+            if e.to_string().contains("No such file") || e.to_string().contains("not found") {
+                HttpError::for_not_found(None, format!("Dataset {} not found", uuid))
             } else {
                 HttpError::for_internal_error(format!("Failed to process manifest: {}", e))
             }
@@ -510,15 +791,20 @@ async fn image_id_head(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("localhost");
 
-    let uuid_str = path_params.id.to_string();
+    let uuid = path_params.id;
+
+    // Ensure index is populated
+    context.refresh_index().await.map_err(|e| {
+        HttpError::for_internal_error(format!("Failed to refresh index: {}", e))
+    })?;
 
     context
-        .process_manifest(&uuid_str, host)
+        .process_manifest(&uuid, host)
         .await
         .map(HttpResponseOk)
         .map_err(|e| {
-            if e.to_string().contains("No such file") {
-                HttpError::for_not_found(None, format!("Dataset {} not found", uuid_str))
+            if e.to_string().contains("No such file") || e.to_string().contains("not found") {
+                HttpError::for_not_found(None, format!("Dataset {} not found", uuid))
             } else {
                 HttpError::for_internal_error(format!("Failed to process manifest: {}", e))
             }
@@ -536,15 +822,28 @@ async fn image_id_file(
 ) -> Result<Response<Body>, HttpError> {
     let context = rqctx.context();
     let path_params = path_params.into_inner();
-    let uuid_str = path_params.id.to_string();
-    let file_path = context.serve_dir.join(&uuid_str).join("file");
+    let uuid = path_params.id;
 
-    // Security check: ensure the file is within the dataset directory
+    // Ensure index is populated
+    context.refresh_index().await.map_err(|e| {
+        HttpError::for_internal_error(format!("Failed to refresh index: {}", e))
+    })?;
+
+    // Look up the image entry
+    let entry = context
+        .get_image_entry(&uuid)
+        .await
+        .ok_or_else(|| HttpError::for_not_found(None, format!("Dataset {} not found", uuid)))?;
+
+    let file_path = entry
+        .image_file_path
+        .ok_or_else(|| HttpError::for_not_found(None, "Image file not found".to_string()))?;
+
+    // Security check: ensure the file is within the serve directory
     let canonical_base = context
         .serve_dir
-        .join(&uuid_str)
         .canonicalize()
-        .map_err(|_| HttpError::for_not_found(None, "Dataset not found".to_string()))?;
+        .map_err(|_| HttpError::for_internal_error("Failed to resolve serve directory".to_string()))?;
     let canonical_file = file_path
         .canonicalize()
         .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
@@ -601,15 +900,28 @@ async fn image_id_file_head(
 ) -> Result<Response<Body>, HttpError> {
     let context = rqctx.context();
     let path_params = path_params.into_inner();
-    let uuid_str = path_params.id.to_string();
-    let file_path = context.serve_dir.join(&uuid_str).join("file");
+    let uuid = path_params.id;
 
-    // Security check: ensure the file is within the dataset directory
+    // Ensure index is populated
+    context.refresh_index().await.map_err(|e| {
+        HttpError::for_internal_error(format!("Failed to refresh index: {}", e))
+    })?;
+
+    // Look up the image entry
+    let entry = context
+        .get_image_entry(&uuid)
+        .await
+        .ok_or_else(|| HttpError::for_not_found(None, format!("Dataset {} not found", uuid)))?;
+
+    let file_path = entry
+        .image_file_path
+        .ok_or_else(|| HttpError::for_not_found(None, "Image file not found".to_string()))?;
+
+    // Security check: ensure the file is within the serve directory
     let canonical_base = context
         .serve_dir
-        .join(&uuid_str)
         .canonicalize()
-        .map_err(|_| HttpError::for_not_found(None, "Dataset not found".to_string()))?;
+        .map_err(|_| HttpError::for_internal_error("Failed to resolve serve directory".to_string()))?;
     let canonical_file = file_path
         .canonicalize()
         .map_err(|_| HttpError::for_not_found(None, "File not found".to_string()))?;
@@ -663,12 +975,14 @@ mod tests {
     #[tokio::test]
     async fn test_process_manifest_url_generation() {
         let temp_dir = TempDir::new().unwrap();
-        let uuid = "08d4292e-4fa2-11e2-852e-c3b213e7719c";
-        let dataset_dir = temp_dir.path().join(uuid);
+        let uuid_str = "08d4292e-4fa2-11e2-852e-c3b213e7719c";
+        let uuid = Uuid::parse_str(uuid_str).unwrap();
+        // Use a descriptive directory name (not UUID) to test new behavior
+        let dataset_dir = temp_dir.path().join("my-test-dataset");
         fs::create_dir_all(&dataset_dir).await.unwrap();
 
         let manifest_content = json!({
-            "uuid": uuid,
+            "uuid": uuid_str,
             "name": "test-dataset",
             "version": "1.0.0",
             "description": "Test dataset",
@@ -687,7 +1001,8 @@ mod tests {
             ]
         });
 
-        let manifest_path = dataset_dir.join("manifest.json");
+        // Use a descriptive manifest name
+        let manifest_path = dataset_dir.join("test-dataset-1.0.0.json");
         fs::write(&manifest_path, manifest_content.to_string())
             .await
             .unwrap();
@@ -702,22 +1017,25 @@ mod tests {
 
         let context = DsapiContext::new(json!({}), config, temp_dir.path().to_path_buf());
 
-        let result = context.process_manifest(uuid, "localhost").await;
+        // Refresh index first
+        context.refresh_index().await.unwrap();
+
+        let result = context.process_manifest(&uuid, "localhost").await;
         assert!(result.is_ok());
 
         let manifest = result.unwrap();
-        assert_eq!(manifest.uuid.to_string(), uuid);
+        assert_eq!(manifest.uuid, uuid);
         assert_eq!(manifest.files.len(), 1);
         assert!(manifest.files[0].url.is_some());
 
-        let expected_url = format!("http://localhost:8876/images/{}/test-file.zfs.bz2", uuid);
+        let expected_url = format!("http://localhost:8876/images/{}/test-file.zfs.bz2", uuid_str);
         assert_eq!(manifest.files[0].url.as_ref().unwrap(), &expected_url);
     }
 
     #[tokio::test]
     async fn test_process_manifest_missing_file() {
         let temp_dir = TempDir::new().unwrap();
-        let uuid = "nonexistent-uuid";
+        let uuid = Uuid::parse_str("08d4292e-4fa2-11e2-852e-c3b213e7719c").unwrap();
 
         let config = Config {
             listen_port: json!(8876),
@@ -728,23 +1046,25 @@ mod tests {
         };
 
         let context = DsapiContext::new(json!({}), config, temp_dir.path().to_path_buf());
+        context.refresh_index().await.unwrap();
 
-        let result = context.process_manifest(uuid, "localhost").await;
+        let result = context.process_manifest(&uuid, "localhost").await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
-    async fn test_get_all_dataset_uuids() {
+    async fn test_get_all_uuids() {
         let temp_dir = TempDir::new().unwrap();
 
-        // Create test datasets
+        // Create test datasets with descriptive directory names
         let uuids = [
             "08d4292e-4fa2-11e2-852e-c3b213e7719c",
             "550e8400-e29b-41d4-a716-446655440000",
         ];
+        let dir_names = ["output-ubuntu-2204", "output-debian-12"];
 
-        for uuid in &uuids {
-            let dataset_dir = temp_dir.path().join(uuid);
+        for (uuid, dir_name) in uuids.iter().zip(dir_names.iter()) {
+            let dataset_dir = temp_dir.path().join(dir_name);
             fs::create_dir_all(&dataset_dir).await.unwrap();
 
             let manifest_content = json!({
@@ -754,14 +1074,12 @@ mod tests {
                 "description": "Test",
                 "os": "smartos",
                 "type": "zone-dataset",
-                "urn": "test:test:test:1.0.0",
-                "creator_name": "test",
-                "creator_uuid": "550e8400-e29b-41d4-a716-446655440000",
                 "published_at": "2023-01-01T00:00:00.000Z",
                 "files": []
             });
 
-            let manifest_path = dataset_dir.join("manifest.json");
+            // Use descriptive manifest file name
+            let manifest_path = dataset_dir.join(format!("{}.json", dir_name));
             fs::write(&manifest_path, manifest_content.to_string())
                 .await
                 .unwrap();
@@ -781,16 +1099,83 @@ mod tests {
 
         let context = DsapiContext::new(json!({}), config, temp_dir.path().to_path_buf());
 
-        let result = context.get_all_dataset_uuids().await;
+        let result = context.get_all_uuids().await;
         assert!(result.is_ok());
 
-        let mut found_uuids = result.unwrap();
+        let mut found_uuids: Vec<String> = result.unwrap().iter().map(|u| u.to_string()).collect();
         found_uuids.sort();
 
         let mut expected_uuids: Vec<String> = uuids.iter().map(|s| s.to_string()).collect();
         expected_uuids.sort();
 
         assert_eq!(found_uuids, expected_uuids);
+    }
+
+    #[tokio::test]
+    async fn test_v2_manifest_format() {
+        let temp_dir = TempDir::new().unwrap();
+        let uuid_str = "09da87d8-f09f-48e7-a7e8-89a638941db8";
+        let uuid = Uuid::parse_str(uuid_str).unwrap();
+        let dataset_dir = temp_dir.path().join("output-ubuntu-2204-x86_64");
+        fs::create_dir_all(&dataset_dir).await.unwrap();
+
+        // V2 format manifest (like those from image builder)
+        let manifest_content = json!({
+            "v": 2,
+            "uuid": uuid_str,
+            "owner": "00000000-0000-0000-0000-000000000000",
+            "name": "ubuntu-22.04",
+            "version": "20260121",
+            "state": "active",
+            "disabled": false,
+            "public": true,
+            "published_at": "2026-01-21T16:00:59Z",
+            "type": "zvol",
+            "os": "linux",
+            "files": [
+                {
+                    "sha1": "a80cacd00aa0a866325bc36c6c55514cb06ed483",
+                    "size": 460237923,
+                    "compression": "gzip"
+                }
+            ],
+            "description": "Ubuntu 22.04 LTS",
+            "image_size": 10240
+        });
+
+        let manifest_path = dataset_dir.join("ubuntu-22.04-20260121.json");
+        fs::write(&manifest_path, manifest_content.to_string())
+            .await
+            .unwrap();
+
+        // Create the image file
+        let image_file = dataset_dir.join("ubuntu-22.04-20260121.x86_64.zfs.gz");
+        fs::write(&image_file, b"fake image data").await.unwrap();
+
+        let config = Config {
+            listen_port: json!(8876),
+            prefix: "http://".to_string(),
+            suffix: ":8876".to_string(),
+            loglevel: "info".to_string(),
+            serve_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+        };
+
+        let context = DsapiContext::new(json!({}), config, temp_dir.path().to_path_buf());
+        context.refresh_index().await.unwrap();
+
+        let result = context.process_manifest(&uuid, "localhost").await;
+        assert!(result.is_ok());
+
+        let manifest = result.unwrap();
+        assert_eq!(manifest.uuid, uuid);
+        assert_eq!(manifest.name, "ubuntu-22.04");
+        assert_eq!(manifest.version, "20260121");
+        assert_eq!(manifest.os, "linux");
+        assert_eq!(manifest.files.len(), 1);
+
+        // File path should be derived from the actual image file
+        assert_eq!(manifest.files[0].path, "ubuntu-22.04-20260121.x86_64.zfs.gz");
+        assert!(manifest.files[0].url.is_some());
     }
 
     #[test]
